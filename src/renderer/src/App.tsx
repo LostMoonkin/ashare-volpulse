@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import type { BootstrapState } from '../../shared/types';
+import type { BootstrapState, MarketDashboardState } from '../../shared/types';
 
 export function App() {
   const [state, setState] = useState<BootstrapState | null>(null);
+  const [market, setMarket] = useState<MarketDashboardState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -12,6 +13,20 @@ export function App() {
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       });
+
+    window.api
+      .getMarketState()
+      .then((initial) => {
+        if (initial) setMarket(initial);
+      })
+      .catch(() => {});
+
+    const unsubscribe = window.api.onMarketStateUpdated((next) => {
+      setMarket(next);
+    });
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   return (
@@ -29,7 +44,7 @@ export function App() {
     >
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <h1 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>A 股实时能量看板</h1>
-        <span style={{ fontSize: '12px', color: '#8b949e' }}>Phase 1 脚手架</span>
+        <span style={{ fontSize: '12px', color: '#8b949e' }}>Phase 3 采集调度</span>
       </header>
 
       {error && (
@@ -69,6 +84,26 @@ export function App() {
               ? `已配置（来源：${state.secretStatus.source}）`
               : '未配置'}
           </div>
+          {market && (
+            <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #30363d' }}>
+              <div>
+                采集态：{market.status.mode} / {market.status.phase} · 数据源：
+                {market.status.activeSnapshotProvider ?? market.status.activeIntradayProvider ?? '—'}
+                {market.status.lastLatencyMs !== null ? ` (${market.status.lastLatencyMs}ms)` : ''}
+              </div>
+              <div>
+                日历来源：{market.status.calendarSource}
+                {market.status.degraded ? ' · 降级' : ''}
+                {market.status.stale ? ' · 陈旧' : ''}
+              </div>
+              <div>
+                两市总成交额：
+                {market.marketTotal.cumTurnover !== null
+                  ? `${(market.marketTotal.cumTurnover / 1e8).toFixed(2)} 亿`
+                  : '不可用（降级）'}
+              </div>
+            </div>
+          )}
         </section>
       ) : (
         !error && <div style={{ fontSize: '12px', color: '#8b949e' }}>正在加载运行状态…</div>

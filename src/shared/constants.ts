@@ -53,6 +53,31 @@ export const MONITORED_INDEX_SYMBOLS = [
   '000688.SH',
 ] as const;
 
+/** 5 只监控指数标准名称映射（用于同花顺等不返回 name 的快照源补全） */
+export const MONITORED_INDEX_NAMES: Readonly<Record<string, string>> = {
+  '000001.SH': '上证指数',
+  '399106.SZ': '深证综指',
+  '399001.SZ': '深证成指',
+  '399006.SZ': '创业板指',
+  '000688.SH': '科创50',
+};
+
+/** 盘中轮询频率与退避预算（依据 Phase 0 压测结论） */
+export const DEFAULT_POLLING_INTERVAL_SEC = 3;
+export const MIN_POLLING_INTERVAL_SEC = 3;
+export const MAX_POLLING_INTERVAL_SEC = 15;
+export const MAX_BACKOFF_INTERVAL_SEC = 30;
+/** 同花顺紧急兜底最低轮询间隔（秒），严禁进入秒级高频轮询 */
+export const HITHINK_FALLBACK_MIN_INTERVAL_SEC = 15;
+/** 单次批量快照请求最大标的数 */
+export const MAX_BATCH_SNAPSHOT_SYMBOLS = 50;
+/** 切至备用源后探测主源恢复的间隔（5 分钟） */
+export const PRIMARY_RECOVERY_PROBE_INTERVAL_MS = 5 * 60 * 1000;
+/** 连续失败达到该次数时触发主备快照源切换 */
+export const FAILOVER_FAILURE_THRESHOLD = 3;
+/** SQLite 中记录交易日历最近同步日期的 app_settings 键名 */
+export const SETTING_CALENDAR_SYNC_DATE = 'calendar.lastSyncedDate';
+
 /** SQLite 滚动保留交易日数 */
 export const DEFAULT_RETENTION_TRADING_DAYS = 30;
 

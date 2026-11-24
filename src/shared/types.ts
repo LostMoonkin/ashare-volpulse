@@ -1,8 +1,171 @@
+import type { IndexScopeBadge } from './constants';
+
 /**
  * 前后端共享数据类型与 SQLite 持久化行契约
  */
 
 export type AlertDirection = 'SURGE' | 'SHRINK';
+
+export type ProviderId = 'tencent' | 'sina' | 'eastmoney' | 'hithink';
+
+export type CalendarSource = 'sqlite_cache' | 'hithink' | 'inferred_degraded';
+
+export type CollectorMode = 'LIVE' | 'REPLAY' | 'IDLE';
+
+export type MarketPhaseType =
+  | 'PRE_MARKET'
+  | 'OPEN_AUCTION'
+  | 'AUCTION_GAP'
+  | 'MORNING_SESSION'
+  | 'LUNCH_BREAK'
+  | 'AFTERNOON_SESSION'
+  | 'POST_MARKET'
+  | 'CLOSED_DAY';
+
+export type VolumeStateType = 'EXPANDING' | 'FLAT' | 'SHRINKING' | 'UNAVAILABLE';
+
+/** 标准化单标的实时快照（金额统一为人民币元，成交量统一为股） */
+export interface QuoteSnapshot {
+  symbol: string;
+  name: string;
+  price: number;
+  prevClose: number;
+  open: number;
+  high: number;
+  low: number;
+  changeAmt: number;
+  /** 涨跌幅百分比数值（如 1.46 表示 +1.46%） */
+  changePct: number;
+  /** 累计成交量（股） */
+  volumeShares: number;
+  /** 累计成交额（人民币元） */
+  turnover: number;
+  /** 行情交易日 YYYY-MM-DD */
+  tradeDate: string;
+  /** 行情时间戳（按北京时间解析的 Unix 毫秒） */
+  timestampMs: number;
+  source: ProviderId;
+}
+
+/** 标准化单日 1 分钟分时基线数据 */
+export interface IntradayDayData {
+  symbol: string;
+  tradeDate: string;
+  prevClose: number | null;
+  auction: {
+    openPrice: number;
+    auctionTurnover: number;
+  } | null;
+  bars: IntradayBarRow[];
+  source: ProviderId;
+}
+
+/** 标准化标的搜索结果 */
+export interface TickerSearchResult {
+  symbol: string;
+  ticker: string;
+  name: string;
+  exchange: 'SH' | 'SZ';
+  assetType: 'STOCK' | 'INDEX';
+  source: ProviderId;
+}
+
+/** 单数据源健康检查结果 */
+export interface ProviderHealthStatus {
+  provider: ProviderId;
+  ok: boolean;
+  latencyMs: number;
+  error: string | null;
+}
+
+/** 能量计算指标快照（与 src/core/energyEngine.ts EnergyMetrics 结构同构） */
+export interface SymbolEnergyMetricsView {
+  minuteIndex: number;
+  elapsedSeconds: number;
+  todayCumTurnover: number | null;
+  prevAlignedCumTurnover: number | null;
+  cumDiff: number | null;
+  cumRatio: number | null;
+  cumRatioPct: number | null;
+  predictedFullDayTurnover: number | null;
+  volumeState: VolumeStateType;
+  slope: number | null;
+  windowMultiple: number | null;
+  slopeWindow: number;
+}
+
+/** 单标的（四大核心指数 / 自选股）看板状态 */
+export interface SymbolEnergySnapshot {
+  symbol: string;
+  name: string;
+  isIndex: boolean;
+  scope?: IndexScopeBadge;
+  scopeDetail?: string;
+  quote: QuoteSnapshot | null;
+  metrics: SymbolEnergyMetricsView | null;
+  auctionTurnover: number | null;
+  prevAuctionTurnover: number | null;
+  prevFullDayTurnover: number | null;
+  todaySeries: IntradayBarRow[];
+  prevSeries: IntradayBarRow[];
+  degraded: boolean;
+  degradedReason: string | null;
+}
+
+/** 沪深两市聚合分时点 */
+export interface MarketTotalBarPoint {
+  minuteIndex: number;
+  cumTurnover: number;
+  barTurnover: number | null;
+}
+
+/** 沪深两市总成交额看板状态 */
+export interface MarketTotalState {
+  symbol: 'MARKET_TOTAL';
+  name: string;
+  tradeDate: string | null;
+  prevTradeDate: string | null;
+  cumTurnover: number | null;
+  shTurnover: number | null;
+  szTurnover: number | null;
+  auctionTurnover: number | null;
+  prevAuctionTurnover: number | null;
+  prevFullDayTurnover: number | null;
+  metrics: SymbolEnergyMetricsView | null;
+  todaySeries: MarketTotalBarPoint[];
+  prevSeries: MarketTotalBarPoint[];
+  degraded: boolean;
+  degradedReason: string | null;
+}
+
+/** 采集调度器与数据源运行态（向渲染进程暴露） */
+export interface CollectorStatus {
+  mode: CollectorMode;
+  phase: MarketPhaseType;
+  tradeDate: string | null;
+  prevTradeDate: string | null;
+  activeSnapshotProvider: ProviderId | null;
+  activeIntradayProvider: ProviderId | null;
+  calendarSource: CalendarSource;
+  calendarDegraded: boolean;
+  pollingIntervalSec: number;
+  configuredIntervalSec: number;
+  lastUpdatedAt: number | null;
+  lastLatencyMs: number | null;
+  consecutiveFailures: number;
+  stale: boolean;
+  degraded: boolean;
+  degradedReasons: string[];
+}
+
+/** 推送给渲染进程的完整看板状态 */
+export interface MarketDashboardState {
+  status: CollectorStatus;
+  marketTotal: MarketTotalState;
+  indices: SymbolEnergySnapshot[];
+  watchlist: SymbolEnergySnapshot[];
+  recentAlerts: AlertEventInput[];
+}
 
 export type SecretSource = 'safeStorage' | 'env' | 'credentialsFile' | 'none';
 

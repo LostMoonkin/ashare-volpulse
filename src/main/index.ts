@@ -7,13 +7,34 @@ import {
   ENCRYPTED_KEY_FILENAME,
 } from '../shared/constants';
 import { IPC_CHANNELS } from '../shared/ipc';
-import type { BootstrapState } from '../shared/types';
+import type { AlertEventInput, BootstrapState, MarketDashboardState } from '../shared/types';
+import {
+  EastmoneyProvider,
+  HithinkProvider,
+  SinaProvider,
+  TencentProvider,
+} from './providers';
+import { PollingScheduler } from './scheduler';
 import { AppDatabase } from './storage/database';
 import { SecretStore } from './storage/secretStore';
 
 let mainWindow: BrowserWindow | null = null;
 let database: AppDatabase | null = null;
 let secretStore: SecretStore | null = null;
+let scheduler: PollingScheduler | null = null;
+
+function broadcastMarketState(state: MarketDashboardState): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.MARKET_STATE_UPDATED, state);
+  }
+}
+
+function handleAlertTriggered(event: AlertEventInput): void {
+  database?.insertAlertEvent(event);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.ALERT_TRIGGERED, event);
+  }
+}
 
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -80,6 +101,23 @@ function registerIpcHandlers(): void {
     }
     return secretStore.getStatus();
   });
+
+  ipcMain.handle(IPC_CHANNELS.MARKET_GET_STATE, () => {
+    return scheduler?.getLatestState() ?? null;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MARKET_REFRESH_NOW, async () => {
+    if (!scheduler) return null;
+    return scheduler.tickOnce();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.TICKER_SEARCH,
+    async (_event, keyword: string, limit?: number) => {
+      if (!scheduler) return [];
+      return scheduler.searchTickers(keyword, limit);
+    }
+  );
 }
 
 function initServices(): void {
@@ -95,12 +133,30 @@ function initServices(): void {
     encryptedFilePath: encryptedKeyPath,
     safeStorage,
   });
+
+  const tencentProvider = new TencentProvider();
+  const sinaProvider = new SinaProvider();
+  const eastmoneyProvider = new EastmoneyProvider();
+  const hithinkProvider = new HithinkProvider({ secretStore });
+
+  scheduler = new PollingScheduler({
+    database,
+    secretStore,
+    primarySnapshotProvider: tencentProvider,
+    secondarySnapshotProvider: sinaProvider,
+    hithinkProvider,
+    primaryIntradayProvider: tencentProvider,
+    secondaryIntradayProvider: eastmoneyProvider,
+    onStateUpdate: broadcastMarketState,
+    onAlertTriggered: handleAlertTriggered,
+  });
 }
 
 app.whenReady().then(() => {
   initServices();
   registerIpcHandlers();
   mainWindow = createMainWindow();
+  void scheduler?.start();
 
   app.on('activate', () => {
     if (!mainWindow && BrowserWindow.getAllWindows().length === 0) {
@@ -118,6 +174,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  scheduler?.stop();
+  scheduler = null;
   database?.close();
   database = null;
   mainWindow = null;
