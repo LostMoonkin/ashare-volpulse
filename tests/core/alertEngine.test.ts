@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AlertEngine } from '../../src/core/alertEngine';
+import { AlertEngine, resolveAlertConfig } from '../../src/core/alertEngine';
 import type { EnergyMetrics } from '../../src/core/energyEngine';
 import { shanghaiToTimestampMs } from '../../src/core/tradingClock';
 
@@ -194,5 +194,80 @@ describe('AlertEngine', () => {
     });
     expect(degradedTotal.triggered).toBe(false);
     expect(degradedTotal.skipReason).toBe('DEGRADED');
+
+    // NaN / Infinity 指标在 OR 模式下也必须拦截，不得产生 NaN 告警
+    const nanMetric = engine.evaluate({
+      symbol: '600519.SH',
+      name: '贵州茅台',
+      tradeDate: d,
+      timestampMs: ts,
+      metrics: makeMetrics({ minuteIndex: 50, slope: 2.5, windowMultiple: Number.NaN }),
+    });
+    expect(nanMetric.triggered).toBe(false);
+    expect(nanMetric.skipReason).toBe('METRICS_UNAVAILABLE');
+  });
+
+  it('ignores explicit undefined fields in config overrides and enforces slopeWindow consistency', () => {
+    const resolved = resolveAlertConfig(
+      { surgeSlopeThreshold: 1.8 },
+      { surgeSlopeThreshold: undefined, enabled: true }
+    );
+    expect(resolved.surgeSlopeThreshold).toBe(1.8);
+    expect(resolved.shrinkMultipleThreshold).toBe(0.65);
+
+    const engine = new AlertEngine();
+    const d = '2026-11-24';
+    const ts = shanghaiToTimestampMs(d, 10, 25, 0);
+
+    // 精准命中阈值边界（+1.2 / 1.5 与 -1.2 / 0.65）应触发
+    const exactSurge = engine.evaluate({
+      symbol: '000001.SH',
+      name: '上证指数',
+      tradeDate: d,
+      timestampMs: ts,
+      metrics: makeMetrics({ minuteIndex: 55, slope: 1.2, windowMultiple: 1.5, slopeWindow: 5 }),
+    });
+    expect(exactSurge.triggered).toBe(true);
+    expect(exactSurge.direction).toBe('SURGE');
+
+    const exactShrink = engine.evaluate({
+      symbol: '000001.SH',
+      name: '上证指数',
+      tradeDate: d,
+      timestampMs: ts,
+      metrics: makeMetrics({
+        minuteIndex: 55,
+        slope: -1.2,
+        windowMultiple: 0.65,
+        cumRatio: -0.06,
+        slopeWindow: 5,
+      }),
+    });
+    expect(exactShrink.triggered).toBe(true);
+    expect(exactShrink.direction).toBe('SHRINK');
+
+    // 单股覆写 slopeWindow=3，但传入 metrics.slopeWindow=5 → 返回 WINDOW_MISMATCH 防止静默错窗
+    const windowMismatch = engine.evaluate({
+      symbol: '300750.SZ',
+      name: '宁德时代',
+      tradeDate: d,
+      timestampMs: ts,
+      metrics: makeMetrics({ minuteIndex: 55, slope: 2.0, windowMultiple: 2.0, slopeWindow: 5 }),
+      symbolOverride: { slopeWindow: 3 },
+    });
+    expect(windowMismatch.triggered).toBe(false);
+    expect(windowMismatch.skipReason).toBe('WINDOW_MISMATCH');
+
+    // 当 metrics.slopeWindow 与覆写后的 slopeWindow=3 对齐时正常触发
+    const windowMatched = engine.evaluate({
+      symbol: '300750.SZ',
+      name: '宁德时代',
+      tradeDate: d,
+      timestampMs: ts,
+      metrics: makeMetrics({ minuteIndex: 55, slope: 2.0, windowMultiple: 2.0, slopeWindow: 3 }),
+      symbolOverride: { slopeWindow: 3 },
+    });
+    expect(windowMatched.triggered).toBe(true);
+    expect(windowMatched.direction).toBe('SURGE');
   });
 });

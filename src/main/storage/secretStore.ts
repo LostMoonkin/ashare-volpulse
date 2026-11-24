@@ -37,17 +37,22 @@ export function parseCredentialsEnv(content: string): string | null {
     if (!line || line.startsWith('#')) continue;
     const match = line.match(/^(?:export\s+)?HITHINK_FINANCE_API_KEY\s*=\s*(.+)$/);
     if (!match) continue;
-    let val = match[1].trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
-      (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
-    ) {
-      val = val.slice(1, -1).trim();
+    const rawVal = match[1].trim();
+    let val = rawVal;
+    if (rawVal.startsWith('"') || rawVal.startsWith("'")) {
+      const quote = rawVal[0];
+      const closingIdx = rawVal.indexOf(quote, 1);
+      if (closingIdx >= 1) {
+        const trailing = rawVal.slice(closingIdx + 1).trim();
+        if (trailing === '' || trailing.startsWith('#')) {
+          val = rawVal.slice(1, closingIdx).trim();
+        }
+      }
     } else {
       // 去掉未加引号时的行尾注释（如 KEY=xxx # comment）
-      const commentIdx = val.indexOf(' #');
+      const commentIdx = rawVal.indexOf(' #');
       if (commentIdx >= 0) {
-        val = val.slice(0, commentIdx).trim();
+        val = rawVal.slice(0, commentIdx).trim();
       }
     }
     if (val) return val;
@@ -77,9 +82,10 @@ export class SecretStore {
     this.encryptedFilePath = options.encryptedFilePath;
     this.safeStorage = options.safeStorage;
     this.env = options.env ?? process.env;
+    const appData = this.env.APPDATA?.trim();
     this.credentialsEnvPath =
       options.credentialsEnvPath ??
-      path.join(this.env.APPDATA ?? '', 'hithink-finance', 'credentials.env');
+      (appData ? path.join(appData, 'hithink-finance', 'credentials.env') : '');
   }
 
   private isEncryptionAvailable(): boolean {

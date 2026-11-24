@@ -320,4 +320,52 @@ describe('AppDatabase', () => {
 
     db.close();
   });
+
+  it('respects asOfDate so future trading_days in calendar never delete today or recent data', () => {
+    const db = new AppDatabase(':memory:');
+
+    // 写入连续 60 个开市日（索引 0..59），模拟日历中包含大量未来交易日
+    const allDates: string[] = [];
+    for (let i = 0; i < 60; i++) {
+      allDates.push(makeDate(i));
+    }
+    db.upsertTradingDays(allDates.map((date) => ({ date, isOpen: true })));
+
+    // 假设“今日”为第 35 个开市日（索引 34）：
+    // - 索引 0..4（共 5 天）早于最近 30 个截至今日的开市日 → 应被清理
+    // - 索引 5..34（共 30 天，含今日索引 34）→ 必须完整保留
+    const asOfDate = allDates[34];
+    db.upsertIntradayBars(
+      allDates.slice(0, 35).map((date) => ({
+        symbol: '000001.SH',
+        tradeDate: date,
+        minuteIndex: 0,
+        minuteStr: '09:31',
+        price: 3500,
+        cumVolume: 1000,
+        cumTurnover: 1e9,
+        barTurnover: 1e9,
+        source: 'tencent',
+      }))
+    );
+
+    const res = db.pruneOlderThanTradingDays(30, asOfDate);
+    expect(res.pruned).toBe(true);
+    expect(res.cutoffDate).toBe(allDates[5]);
+    expect(res.deleted.intradayBars).toBe(5);
+    expect(db.getIntradayBars('000001.SH', allDates[4])).toHaveLength(0);
+    expect(db.getIntradayBars('000001.SH', allDates[5])).toHaveLength(1);
+    expect(db.getIntradayBars('000001.SH', asOfDate)).toHaveLength(1);
+
+    // 截至今日开市日不足 30 天时，即便表内有大量未来交易日也不得清理
+    const earlyRes = db.pruneOlderThanTradingDays(30, allDates[10]);
+    expect(earlyRes.pruned).toBe(false);
+    expect(earlyRes.openTradingDaysCount).toBe(11);
+    expect(earlyRes.cutoffDate).toBeNull();
+
+    // 非法日期格式应显式报错，防止混合 YYYYMMDD / YYYY-MM-DD 格式静默失效
+    expect(() => db.pruneOlderThanTradingDays(30, '20261124')).toThrow(RangeError);
+
+    db.close();
+  });
 });

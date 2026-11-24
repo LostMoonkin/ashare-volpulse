@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { getShanghaiParts } from '../core/tradingClock';
 import {
   DATABASE_FILENAME,
   DEFAULT_RETENTION_TRADING_DAYS,
@@ -33,11 +34,13 @@ function createMainWindow(): BrowserWindow {
 
   win.once('ready-to-show', () => {
     win.show();
-    const smokeExitMs = Number(process.env.A_SHARE_SMOKE_EXIT_MS || '0');
-    if (smokeExitMs > 0) {
-      setTimeout(() => {
-        app.quit();
-      }, smokeExitMs);
+    if (!app.isPackaged) {
+      const smokeExitMs = Number(process.env.A_SHARE_SMOKE_EXIT_MS || '0');
+      if (smokeExitMs > 0) {
+        setTimeout(() => {
+          app.quit();
+        }, smokeExitMs);
+      }
     }
   });
 
@@ -85,7 +88,8 @@ function initServices(): void {
   const encryptedKeyPath = path.join(userDataDir, ENCRYPTED_KEY_FILENAME);
 
   database = new AppDatabase(dbPath);
-  database.pruneOlderThanTradingDays(DEFAULT_RETENTION_TRADING_DAYS);
+  const todayShanghai = getShanghaiParts(Date.now()).dateStr;
+  database.pruneOlderThanTradingDays(DEFAULT_RETENTION_TRADING_DAYS, todayShanghai);
 
   secretStore = new SecretStore({
     encryptedFilePath: encryptedKeyPath,

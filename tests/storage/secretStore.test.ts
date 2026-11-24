@@ -60,6 +60,14 @@ describe('parseCredentialsEnv', () => {
     expect(parseCredentialsEnv('HITHINK_FINANCE_API_KEY=key-with-note # inline comment')).toBe(
       'key-with-note'
     );
+    expect(parseCredentialsEnv('\uFEFFHITHINK_FINANCE_API_KEY=bom-key\n')).toBe('bom-key');
+    expect(parseCredentialsEnv('HITHINK_FINANCE_API_KEY="quoted-secret" # inline note\n')).toBe(
+      'quoted-secret'
+    );
+    expect(parseCredentialsEnv("HITHINK_FINANCE_API_KEY='single#hash' # inline note\n")).toBe(
+      'single#hash'
+    );
+    expect(parseCredentialsEnv('HITHINK_FINANCE_API_KEY="" # empty\n')).toBeNull();
     expect(parseCredentialsEnv('OTHER_KEY=abc\n')).toBeNull();
   });
 });
@@ -196,5 +204,34 @@ describe('SecretStore', () => {
       source: 'env',
       encryptionAvailable: false,
     });
+  });
+
+  it('does not fall back to a relative credentials.env path in cwd when APPDATA is unset', () => {
+    const dir = createTempDir();
+    const origCwd = process.cwd();
+    try {
+      fs.mkdirSync(path.join(dir, 'hithink-finance'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'hithink-finance', 'credentials.env'),
+        'HITHINK_FINANCE_API_KEY=should-not-be-read-from-cwd\n',
+        'utf8'
+      );
+      process.chdir(dir);
+
+      const store = new SecretStore({
+        encryptedFilePath: path.join(dir, 'missing.enc'),
+        safeStorage: createMockSafeStorage(false),
+        env: {},
+      });
+
+      expect(store.getApiKey()).toBeNull();
+      expect(store.getStatus()).toEqual({
+        configured: false,
+        source: 'none',
+        encryptionAvailable: false,
+      });
+    } finally {
+      process.chdir(origCwd);
+    }
   });
 });

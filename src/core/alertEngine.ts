@@ -65,6 +65,7 @@ export type AlertSkipReason =
   | 'DISABLED'
   | 'DEGRADED'
   | 'COLD_START'
+  | 'WINDOW_MISMATCH'
   | 'METRICS_UNAVAILABLE'
   | 'NO_SIGNAL'
   | 'COOLDOWN';
@@ -76,8 +77,23 @@ export interface AlertEvaluationResult {
   readonly skipReason: AlertSkipReason | null;
 }
 
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function stripUndefined<T extends object>(obj?: Partial<T> | null): Partial<T> {
+  if (!obj) return {};
+  const result: Partial<T> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      (result as Record<string, unknown>)[key] = value;
+    }
+  }
+  return result;
+}
+
 /**
- * 合并全局默认配置与单股覆写配置。
+ * 合并全局默认配置与单股覆写配置（自动忽略显式 undefined 字段，避免覆盖默认值）。
  */
 export function resolveAlertConfig(
   globalConfig: Partial<AlertRuleConfig> = {},
@@ -85,8 +101,8 @@ export function resolveAlertConfig(
 ): AlertRuleConfig {
   return {
     ...DEFAULT_ALERT_CONFIG,
-    ...globalConfig,
-    ...(symbolOverride ?? {}),
+    ...stripUndefined(globalConfig),
+    ...stripUndefined(symbolOverride),
   };
 }
 
@@ -158,11 +174,16 @@ export class AlertEngine {
       return { triggered: false, event: null, direction: null, skipReason: 'COLD_START' };
     }
 
-    // 任一核心指标不可用时不触发
+    // 校验评估指标所用的斜率窗口与当前生效配置（含单股覆写）一致
+    if (metrics.slopeWindow !== cfg.slopeWindow) {
+      return { triggered: false, event: null, direction: null, skipReason: 'WINDOW_MISMATCH' };
+    }
+
+    // 任一核心指标不可用（null 或非有限数值如 NaN/Infinity）时不触发
     if (
-      metrics.slope === null ||
-      metrics.windowMultiple === null ||
-      metrics.cumRatio === null
+      !isFiniteNumber(metrics.slope) ||
+      !isFiniteNumber(metrics.windowMultiple) ||
+      !isFiniteNumber(metrics.cumRatio)
     ) {
       return { triggered: false, event: null, direction: null, skipReason: 'METRICS_UNAVAILABLE' };
     }

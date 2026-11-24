@@ -95,4 +95,56 @@ describe('marketAggregator', () => {
     expect(partial.degraded).toBe(true);
     expect(partial.auctionTurnover).toBeNull();
   });
+
+  it('avoids lumping skipped minutes into barTurnover and flags degraded when both sides have invalid bars', () => {
+    // 未提供 barTurnover 且缺失 minuteIndex=1：minuteIndex=2 的 barTurnover 不得合并 2 分钟增量，应为 null
+    const gapWithoutBarTurnover = aggregateMarketTotalSeries(
+      [
+        { minuteIndex: 0, cumTurnover: 100 },
+        { minuteIndex: 1, cumTurnover: 220 },
+        { minuteIndex: 2, cumTurnover: 350 },
+        { minuteIndex: 3, cumTurnover: 500 },
+      ],
+      [
+        { minuteIndex: 0, cumTurnover: 150 },
+        { minuteIndex: 2, cumTurnover: 450 },
+        { minuteIndex: 3, cumTurnover: 650 },
+      ]
+    );
+    expect(gapWithoutBarTurnover.degraded).toBe(true);
+    expect(gapWithoutBarTurnover.bars.map((b) => b.minuteIndex)).toEqual([0, 2, 3]);
+    expect(gapWithoutBarTurnover.bars[0].barTurnover).toBe(250);
+    expect(gapWithoutBarTurnover.bars[1].barTurnover).toBeNull(); // 缺口后不虚增单分钟增量
+    expect(gapWithoutBarTurnover.bars[2].barTurnover).toBe(350); // 2->3 连续：1150 - 800 = 350
+
+    // 双边同分钟均为 NaN 时仍必须标记 degraded=true
+    const bothInvalid = aggregateMarketTotalSeries(
+      [
+        { minuteIndex: 0, cumTurnover: 100 },
+        { minuteIndex: 1, cumTurnover: Number.NaN },
+      ],
+      [
+        { minuteIndex: 0, cumTurnover: 150 },
+        { minuteIndex: 1, cumTurnover: Number.NaN },
+      ]
+    );
+    expect(bothInvalid.degraded).toBe(true);
+    expect(bothInvalid.bars).toHaveLength(1);
+
+    // 盘后双边 minuteIndex 均为 null 时允许正常合计，时间戳漂移超过 60s 时降级
+    const postMarket = aggregateMarketTotalSnapshot([
+      { symbol: '000001.SH', tradeDate: '2026-11-24', minuteIndex: null, timestampMs: 100_000, cumTurnover: 7e11 },
+      { symbol: '399106.SZ', tradeDate: '2026-11-24', minuteIndex: null, timestampMs: 160_000, cumTurnover: 8e11 },
+    ]);
+    expect(postMarket.degraded).toBe(false);
+    expect(postMarket.cumTurnover).toBe(1.5e12);
+
+    const drifted = aggregateMarketTotalSnapshot([
+      { symbol: '000001.SH', tradeDate: '2026-11-24', minuteIndex: 10, timestampMs: 100_000, cumTurnover: 7e11 },
+      { symbol: '399106.SZ', tradeDate: '2026-11-24', minuteIndex: 10, timestampMs: 160_001, cumTurnover: 8e11 },
+    ]);
+    expect(drifted.degraded).toBe(true);
+    expect(drifted.reason).toBe('TIMESTAMP_MISALIGNED');
+    expect(drifted.cumTurnover).toBeNull();
+  });
 });

@@ -151,10 +151,21 @@ export class AppDatabase {
     }));
   }
 
-  getRecentOpenTradingDays(limit: number): string[] {
-    const rows = this.db
-      .prepare('SELECT date FROM trading_days WHERE is_open = 1 ORDER BY date DESC LIMIT ?')
-      .all(limit) as Array<{ date: string }>;
+  getRecentOpenTradingDays(limit: number, asOfDate?: string): string[] {
+    if (asOfDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+      throw new RangeError(`Invalid asOfDate (expected YYYY-MM-DD): ${asOfDate}`);
+    }
+    const rows = (
+      asOfDate !== undefined
+        ? this.db
+            .prepare(
+              'SELECT date FROM trading_days WHERE is_open = 1 AND date <= ? ORDER BY date DESC LIMIT ?'
+            )
+            .all(asOfDate, limit)
+        : this.db
+            .prepare('SELECT date FROM trading_days WHERE is_open = 1 ORDER BY date DESC LIMIT ?')
+            .all(limit)
+    ) as Array<{ date: string }>;
     return rows.map((r) => r.date);
   }
 
@@ -457,13 +468,17 @@ export class AppDatabase {
    * 依据 trading_days 中最近 keepDays 个开市日，清理更早的日内行情、竞价与告警记录。
    * - 不触碰 watchlist、app_settings、trading_days
    * - trading_days 为空或开市日不足 keepDays 时不删除任何数据
+   * - 传入 asOfDate（YYYY-MM-DD）时仅统计 date <= asOfDate 的开市日，防止日历含未来日期时误删当日/近期数据
    */
-  pruneOlderThanTradingDays(keepDays = DEFAULT_RETENTION_TRADING_DAYS): PruneResult {
+  pruneOlderThanTradingDays(
+    keepDays = DEFAULT_RETENTION_TRADING_DAYS,
+    asOfDate?: string
+  ): PruneResult {
     if (!Number.isInteger(keepDays) || keepDays <= 0) {
       throw new Error(`Invalid keepDays: ${keepDays}`);
     }
 
-    const recentOpenDays = this.getRecentOpenTradingDays(keepDays);
+    const recentOpenDays = this.getRecentOpenTradingDays(keepDays, asOfDate);
     if (recentOpenDays.length < keepDays) {
       return {
         pruned: false,

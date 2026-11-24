@@ -15,11 +15,10 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "baseUrl": ".",
     "paths": {
-      "@shared/*": ["src/shared/*"],
-      "@core/*": ["src/core/*"],
-      "@main/*": ["src/main/*"]
+      "@shared/*": ["./src/shared/*"],
+      "@core/*": ["./src/core/*"],
+      "@main/*": ["./src/main/*"]
     }
   },
   "include": [

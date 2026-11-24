@@ -136,6 +136,8 @@ export function alignPrevCumTurnover(
   elapsedSeconds: number,
   prevAuctionTurnover?: number | null
 ): number | null {
+  if (!isValidNumber(elapsedSeconds)) return null;
+
   const prevAtT = prevMap.get(minuteIndex);
   if (prevAtT === undefined) return null;
 
@@ -146,8 +148,11 @@ export function alignPrevCumTurnover(
 
   let prevBase: number;
   if (minuteIndex === 0) {
-    prevBase =
-      isValidNumber(prevAuctionTurnover) && prevAuctionTurnover >= 0 ? prevAuctionTurnover : 0;
+    // 昨日 09:25 集合竞价基准缺失时不静默补零，防止开盘第一分钟产生严重假放量
+    if (!isValidNumber(prevAuctionTurnover) || prevAuctionTurnover < 0) {
+      return null;
+    }
+    prevBase = prevAuctionTurnover;
   } else {
     const prevAtPrevMinute = prevMap.get(minuteIndex - 1);
     if (prevAtPrevMinute === undefined) {
@@ -171,7 +176,9 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
   };
 
   const t = input.minuteIndex;
-  const elapsedSeconds = Math.max(0, Math.min(60, input.elapsedSeconds ?? 60));
+  const rawElapsed = input.elapsedSeconds ?? 60;
+  const hasValidElapsed = isValidNumber(rawElapsed);
+  const elapsedSeconds = hasValidElapsed ? Math.max(0, Math.min(60, rawElapsed)) : 0;
   const todayMap = toTurnoverMap(input.todaySeries);
   const prevMap = toTurnoverMap(input.prevSeries);
 
@@ -182,12 +189,9 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
         : null
       : todayMap.get(t) ?? null;
 
-  const prevAlignedAtT = alignPrevCumTurnover(
-    prevMap,
-    t,
-    elapsedSeconds,
-    input.prevAuctionTurnover
-  );
+  const prevAlignedAtT = hasValidElapsed
+    ? alignPrevCumTurnover(prevMap, t, elapsedSeconds, input.prevAuctionTurnover)
+    : null;
 
   let cumDiff: number | null = null;
   let cumRatio: number | null = null;

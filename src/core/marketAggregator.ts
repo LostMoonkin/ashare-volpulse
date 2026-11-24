@@ -56,7 +56,8 @@ export interface SymbolMinuteBar {
 export interface AggregatedMinuteBar {
   readonly minuteIndex: number;
   readonly cumTurnover: number;
-  readonly barTurnover: number;
+  /** 单分钟增量成交额；未传入双边单分钟增量且前后分钟不连续时为 null，避免跨缺口虚增单分钟增量 */
+  readonly barTurnover: number | null;
   readonly shCumTurnover: number;
   readonly szCumTurnover: number;
 }
@@ -87,6 +88,10 @@ export interface MarketTotalAuctionResult {
 
 function isValidTurnover(val: unknown): val is number {
   return typeof val === 'number' && Number.isFinite(val) && val >= 0;
+}
+
+function isValidMinuteIndex(val: unknown): val is number {
+  return typeof val === 'number' && Number.isInteger(val) && val >= 0 && val <= 239;
 }
 
 function findSymbolSnapshot(
@@ -242,17 +247,22 @@ export function aggregateMarketTotalSeries(
   const shMap = new Map<number, SymbolMinuteBar>();
   const szMap = new Map<number, SymbolMinuteBar>();
   const allIndices = new Set<number>();
+  let hasInvalidInput = false;
 
   for (const bar of shBars) {
-    if (isValidTurnover(bar.cumTurnover)) {
+    if (isValidMinuteIndex(bar.minuteIndex) && isValidTurnover(bar.cumTurnover)) {
       shMap.set(bar.minuteIndex, bar);
       allIndices.add(bar.minuteIndex);
+    } else {
+      hasInvalidInput = true;
     }
   }
   for (const bar of szBars) {
-    if (isValidTurnover(bar.cumTurnover)) {
+    if (isValidMinuteIndex(bar.minuteIndex) && isValidTurnover(bar.cumTurnover)) {
       szMap.set(bar.minuteIndex, bar);
       allIndices.add(bar.minuteIndex);
+    } else {
+      hasInvalidInput = true;
     }
   }
 
@@ -275,12 +285,16 @@ export function aggregateMarketTotalSeries(
 
     const prevAgg = bars.length > 0 ? bars[bars.length - 1] : null;
     const cumTurnover = sh.cumTurnover + sz.cumTurnover;
-    const barTurnover =
-      isValidTurnover(sh.barTurnover) && isValidTurnover(sz.barTurnover)
-        ? sh.barTurnover + sz.barTurnover
-        : prevAgg
-          ? Math.max(0, cumTurnover - prevAgg.cumTurnover)
-          : cumTurnover;
+    let barTurnover: number | null;
+    if (isValidTurnover(sh.barTurnover) && isValidTurnover(sz.barTurnover)) {
+      barTurnover = sh.barTurnover + sz.barTurnover;
+    } else if (prevAgg && prevAgg.minuteIndex === idx - 1) {
+      barTurnover = Math.max(0, cumTurnover - prevAgg.cumTurnover);
+    } else if (idx === 0) {
+      barTurnover = cumTurnover;
+    } else {
+      barTurnover = null;
+    }
 
     bars.push({
       minuteIndex: idx,
@@ -292,7 +306,10 @@ export function aggregateMarketTotalSeries(
   }
 
   const degraded =
-    bars.length === 0 || missingShMinutes.length > 0 || missingSzMinutes.length > 0;
+    hasInvalidInput ||
+    bars.length === 0 ||
+    missingShMinutes.length > 0 ||
+    missingSzMinutes.length > 0;
 
   return {
     symbol: MARKET_TOTAL_SYMBOL,

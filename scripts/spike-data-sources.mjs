@@ -636,7 +636,7 @@ async function main() {
   console.table(comparison);
 
   console.log('\n--- 4. Intraday 1-Min (Today + Prev Day) Probes ---');
-  // 东财 trends2 全 7 标的（iscr=1，含竞价）并测冷启动串行/并发耗时
+  // 东财 trends2 全 8 标的（iscr=1，含竞价与对照 399102.SZ）并测冷启动串行耗时
   const emTrendsStart = performance.now();
   const emTrendsAll = [];
   for (const sym of SYMBOLS) {
@@ -653,7 +653,7 @@ async function main() {
     const datesDesc = (r.dates || []).map((d) => `${d.date}:${d.count}条(sum=${d.sumTurnoverYi}亿,pre0930=${d.pre0930Count}/${d.pre0930TurnoverYi}亿)`).join(' | ');
     console.log(`[em trends2] ${r.thscode} ok=${r.ok} ${r.latencyMs}ms => ${datesDesc}`);
   }
-  console.log(`[em trends2 batch 7 symbols] total=${emTrendsBatchMs}ms`);
+  console.log(`[em trends2 batch ${SYMBOLS.length} symbols] total=${emTrendsBatchMs}ms`);
 
   // 腾讯分时与分钟线（覆盖全部测试标的）
   const txIntraday = [];
