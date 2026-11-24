@@ -10,6 +10,7 @@ import {
   fetchBufferWithTimeout,
   isShanghaiIndexThscode,
   parseSplitShanghaiTimestamp,
+  parseStrictFiniteNumber,
   toTxSinaCode,
 } from './http';
 import { ProviderRequestError, type FetchLike, type MarketDataProvider } from './types';
@@ -44,13 +45,13 @@ export function parseSinaSnapshotResponse(text: string): Map<string, QuoteSnapsh
     if (parts.length < 32) continue;
 
     const name = parts[0]?.trim() || symbol;
-    const open = Number(parts[1]);
-    const prevClose = Number(parts[2]);
-    const price = Number(parts[3]);
-    const high = Number(parts[4]);
-    const low = Number(parts[5]);
-    const rawVolume = Number(parts[8]);
-    const turnover = Number(parts[9]);
+    const open = parseStrictFiniteNumber(parts[1]);
+    const prevClose = parseStrictFiniteNumber(parts[2]);
+    const price = parseStrictFiniteNumber(parts[3]);
+    const high = parseStrictFiniteNumber(parts[4]);
+    const low = parseStrictFiniteNumber(parts[5]);
+    const rawVolume = parseStrictFiniteNumber(parts[8]);
+    const turnover = parseStrictFiniteNumber(parts[9]);
     const parsedTime = parseSplitShanghaiTimestamp(parts[30] ?? '', parts[31] ?? '');
 
     if (

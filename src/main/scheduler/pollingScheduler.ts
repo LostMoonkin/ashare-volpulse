@@ -11,11 +11,13 @@ import {
   getShanghaiParts,
   minuteIndexToLabel,
   resolveAlertConfig,
+  shanghaiToTimestampMs,
   timestampToMinuteIndex,
   type AlertRuleConfig,
   type EnergyEngineConfig,
   type MarketPhase,
   type SymbolAlertOverride,
+  type SymbolMinuteBar,
   type SymbolTurnoverSnapshot,
 } from '../../core';
 import {
@@ -60,8 +62,25 @@ import type { AppDatabase } from '../storage/database';
 import type { SecretStore } from '../storage/secretStore';
 
 const TOTAL_DAY_BARS = 240;
+const MORNING_BARS = 120;
 const NON_TRADING_WAKE_INTERVAL_MS = 30_000;
+const IDLE_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
+const BACKFILL_RETRY_COOLDOWN_MS = 120_000;
+const CALENDAR_REPROBE_INTERVAL_MS = 30_000;
+const UPSTREAM_SNAPSHOT_STALE_MIN_MS = 60_000;
 const MAX_RECENT_ALERTS = 100;
+
+const SEC_09_15 = 9 * 3600 + 15 * 60;
+const SEC_09_25 = 9 * 3600 + 25 * 60;
+const SEC_09_26 = 9 * 3600 + 26 * 60;
+const SEC_09_35 = 9 * 3600 + 35 * 60;
+const SEC_11_30 = 11 * 3600 + 30 * 60;
+const SEC_11_31 = 11 * 3600 + 31 * 60;
+const SEC_15_00 = 15 * 3600;
+const SEC_15_01 = 15 * 3600 + 60;
+const SEC_15_10 = 15 * 3600 + 10 * 60;
+
+type CybScopeGroup = 'tx_sina' | 'em_hithink';
 
 interface PendingMinuteBar {
   minuteIndex: number;
@@ -73,7 +92,8 @@ interface PendingMinuteBar {
 
 export interface PollingSchedulerOptions {
   database: AppDatabase;
-  secretStore: Pick<SecretStore, 'getApiKey' | 'getStatus'>;
+  /** 可选保留参数（历史兼容，同花顺凭据由 hithinkProvider 内部读取） */
+  secretStore?: Pick<SecretStore, 'getApiKey' | 'getStatus'>;
   primarySnapshotProvider: MarketDataProvider;
   secondarySnapshotProvider: MarketDataProvider;
   hithinkProvider: HithinkProvider;
@@ -99,13 +119,138 @@ function clampPollingInterval(sec: number): number {
   return Math.max(MIN_POLLING_INTERVAL_SEC, Math.min(MAX_POLLING_INTERVAL_SEC, Math.round(sec)));
 }
 
-function hasMinuteGap(bars: readonly { minuteIndex: number }[]): boolean {
+/** 获取 YYYY-MM-DD 对应的星期几（0=周日 .. 6=周六，独立于宿主机时区） */
+function getDateWeekday(dateStr: string): number {
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return 0;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
+}
+
+/** 计算给定日期 YYYY-MM-DD 的下一个自然日 YYYY-MM-DD */
+function nextCalendarDate(dateStr: string): string {
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return dateStr;
+  const next = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + 1));
+  const y = next.getUTCFullYear();
+  const m = String(next.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(next.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * 创业板指（399006.SZ）口径分组（docs/DATA_SOURCES.md §2.2）：
+ * - 腾讯与新浪口径 100% 一致（创业板全市场股票）
+ * - 东财与同花顺口径一致（含扩展统计口径，较腾讯/新浪高约 +1.13%）
+ */
+function getCybScopeGroup(source: string | null | undefined): CybScopeGroup | null {
+  if (source === 'tencent' || source === 'sina') return 'tx_sina';
+  if (source === 'eastmoney' || source === 'hithink') return 'em_hithink';
+  return null;
+}
+
+/**
+ * 检测 399006.SZ 在昨日基线、今日已落盘分时与实时快照之间是否存在跨口径混用。
+ * 覆盖 LIVE 与 REPLAY 两种模式，防止将不同口径相除制造 +1.13% 假放量。
+ */
+function hasCybCrossSourceMismatch(params: {
+  symbol: string;
+  todayBars: readonly IntradayBarRow[];
+  prevBars: readonly IntradayBarRow[];
+  liveSnap: QuoteSnapshot | null;
+}): boolean {
+  if (params.symbol !== '399006.SZ') return false;
+  const groups = new Set<CybScopeGroup>();
+
+  for (const bar of params.prevBars) {
+    const g = getCybScopeGroup(bar.source);
+    if (g) groups.add(g);
+  }
+  for (const bar of params.todayBars) {
+    const g = getCybScopeGroup(bar.source);
+    if (g) groups.add(g);
+  }
+  if (params.liveSnap) {
+    const g = getCybScopeGroup(params.liveSnap.source);
+    if (g) groups.add(g);
+  }
+
+  return groups.size > 1;
+}
+
+/**
+ * 检查有序分钟序列是否存在缺口（含头部缺 09:30、内部跳号或尾部截断）。
+ * 当 expectedLastClosedIndex < 0（如 09:30 第一分钟尚未闭合）时，空序列不视为缺口。
+ */
+function hasSeriesGap(
+  bars: readonly { minuteIndex: number }[],
+  expectedLastClosedIndex: number | null
+): boolean {
+  if (bars.length === 0) {
+    return expectedLastClosedIndex !== null && expectedLastClosedIndex >= 0;
+  }
+  if (bars[0].minuteIndex > 0) {
+    return true;
+  }
   for (let i = 1; i < bars.length; i++) {
     if (bars[i].minuteIndex !== bars[i - 1].minuteIndex + 1) {
       return true;
     }
   }
+  if (
+    expectedLastClosedIndex !== null &&
+    expectedLastClosedIndex >= 0 &&
+    bars[bars.length - 1].minuteIndex < expectedLastClosedIndex
+  ) {
+    return true;
+  }
   return false;
+}
+
+/**
+ * 构造传给 aggregateMarketTotalSeries 的分钟点，对跨缺口的分钟省略 barTurnover，
+ * 让核心聚合引擎将其标为 null，避免将多分钟累计差值虚增到单分钟柱状图。
+ */
+function toAggregatorBars(bars: readonly IntradayBarRow[]): SymbolMinuteBar[] {
+  return bars.map((bar, i) => {
+    const prev = i > 0 ? bars[i - 1] : null;
+    const isContiguous =
+      bar.minuteIndex === 0 || (prev !== null && prev.minuteIndex === bar.minuteIndex - 1);
+    return isContiguous
+      ? {
+          minuteIndex: bar.minuteIndex,
+          cumTurnover: bar.cumTurnover,
+          barTurnover: bar.barTurnover,
+        }
+      : {
+          minuteIndex: bar.minuteIndex,
+          cumTurnover: bar.cumTurnover,
+        };
+  });
+}
+
+/**
+ * 将实时快照时间戳映射到连续交易分钟索引与秒数：
+ * - 常规交易时间严格复用 src/core/tradingClock.ts
+ * - 兼容上游真实延迟推送的午盘闭合（11:30:01–11:31:00 → 119）与收盘集合竞价（15:00:01–15:01:00 → 239）
+ */
+function resolveSnapshotMinute(
+  timestampMs: number
+): { minuteIndex: number; elapsedSeconds: number } | null {
+  const directIdx = timestampToMinuteIndex(timestampMs);
+  if (directIdx !== null) {
+    return {
+      minuteIndex: directIdx,
+      elapsedSeconds: getElapsedSecondsInMinute(timestampMs) ?? 60,
+    };
+  }
+  const { secondsOfDay } = getShanghaiParts(timestampMs);
+  if (secondsOfDay > SEC_11_30 && secondsOfDay <= SEC_11_31) {
+    return { minuteIndex: 119, elapsedSeconds: 60 };
+  }
+  if (secondsOfDay > SEC_15_00 && secondsOfDay <= SEC_15_01) {
+    return { minuteIndex: 239, elapsedSeconds: 60 };
+  }
+  return null;
 }
 
 function parseWatchlistOverride(item: WatchlistItemRow): SymbolAlertOverride {
@@ -125,11 +270,11 @@ function parseWatchlistOverride(item: WatchlistItemRow): SymbolAlertOverride {
 
 /**
  * 混合双源行情采集与自适应分层调度器：
- * - 启动/跨日加载交易日历（SQLite 缓存 → 同花顺 → 公开分时推断降级）
+ * - 启动/跨日加载交易日历（SQLite 当日缓存 → 同花顺 → 公开分时/快照降级推断）
  * - 自动按需补齐昨日完整 240 分钟及今日已过分钟并落盘 SQLite（绝不补零）
  * - 交易时段按配置周期批量轮询 5 指数 + 实时自选股，调用 src/core/ 计算能量与告警
- * - 遇错误或 429/403 指数退避并自动主备切换（腾讯 → 新浪 → 同花顺低频兜底），主源恢复后回切与回落
- * - 午休、盘后、休市自动停止高频轮询并进入复盘模式，收盘后执行 30 交易日滚动清理
+ * - 遇错误或 429/403 指数退避并自动主备切换（腾讯 → 新浪 → 同花顺低频兜底），主/备源恢复后回切与回落
+ * - 午休、盘后、休市自动停止高频轮询并进入复盘模式，保留纯本地时钟轻量唤醒以便次日自动开盘，收盘后执行 30 交易日滚动清理
  */
 export class PollingScheduler {
   private readonly db: AppDatabase;
@@ -150,6 +295,7 @@ export class PollingScheduler {
   private effectiveIntervalSec: number;
 
   private running = false;
+  private stopped = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight: Promise<MarketDashboardState> | null = null;
 
@@ -157,15 +303,20 @@ export class PollingScheduler {
   private openTradingDaySet = new Set<string>();
   private calendarSource: CalendarSource = 'sqlite_cache';
   private calendarDegraded = false;
+  private calendarNeedsTodayReprobe = false;
+  private lastCalendarReprobeAt = 0;
   private initializedForDate: string | null = null;
   private lastPrunedDate: string | null = null;
 
   private displayTradeDate: string | null = null;
   private prevTradeDate: string | null = null;
+  private activeDisplayDate: string | null = null;
+  private activePrevDate: string | null = null;
+  private lastWatchlistSignature = '';
   private mode: CollectorMode = 'IDLE';
   private lastPhase: MarketPhase = 'CLOSED_DAY';
 
-  private activeSnapshotProvider: ProviderId = 'tencent';
+  private activeSnapshotProvider: ProviderId;
   private activeIntradayProvider: ProviderId | null = null;
   private consecutiveFailures = 0;
   private lastPrimaryProbeAt = 0;
@@ -178,8 +329,10 @@ export class PollingScheduler {
   private readonly todayAuctions = new Map<string, { openPrice: number; auctionTurnover: number }>();
   private readonly prevAuctions = new Map<string, { openPrice: number; auctionTurnover: number }>();
   private readonly pendingBars = new Map<string, PendingMinuteBar>();
-  private readonly backfilledKeys = new Set<string>();
+  private readonly loadedFromDbSymbols = new Set<string>();
+  private readonly lastBackfillAttemptAt = new Map<string, number>();
   private readonly intradaySourceBySymbol = new Map<string, ProviderId>();
+  private readonly cybRealignedGroups = new Set<string>();
   private readonly recentAlerts: AlertEventInput[] = [];
   private latestState: MarketDashboardState | null = null;
 
@@ -190,6 +343,7 @@ export class PollingScheduler {
     this.hithink = options.hithinkProvider;
     this.primaryIntraday = options.primaryIntradayProvider;
     this.secondaryIntraday = options.secondaryIntradayProvider;
+    this.activeSnapshotProvider = options.primarySnapshotProvider.id;
     this.nowFn = options.nowFn ?? (() => Date.now());
     this.sleepFn = options.sleepFn ?? defaultSleep;
     this.backfillDelayMs = options.backfillDelayMs ?? 150;
@@ -204,25 +358,36 @@ export class PollingScheduler {
       ...DEFAULT_ENERGY_CONFIG,
       ...(options.energyConfig ?? {}),
     };
-    this.alertEngine = new AlertEngine(options.alertConfig);
+    this.alertEngine = new AlertEngine({
+      ...(options.energyConfig?.slopeWindow !== undefined
+        ? { slopeWindow: options.energyConfig.slopeWindow }
+        : {}),
+      ...(options.alertConfig ?? {}),
+    });
   }
 
   /** 启动调度器并立即执行一次初始化与状态计算 */
   async start(): Promise<MarketDashboardState> {
+    this.stopped = false;
     this.running = true;
     const state = await this.tickOnce();
-    this.scheduleNextTick();
+    if (this.running && !this.stopped) {
+      this.scheduleNextTick();
+    }
     return state;
   }
 
-  /** 停止所有定时轮询并落盘尚未闭合的待提交分钟线 */
+  /** 停止所有定时轮询并落盘尚未闭合的待提交分钟线（之后在途异步回调不再触碰 SQLite） */
   stop(): void {
     this.running = false;
     if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    this.flushAllPendingBars();
+    if (!this.stopped) {
+      this.flushAllPendingBars();
+      this.stopped = true;
+    }
   }
 
   getLatestState(): MarketDashboardState | null {
@@ -237,7 +402,7 @@ export class PollingScheduler {
           ? Math.max(this.configuredIntervalSec, this.effectiveIntervalSec)
           : this.configuredIntervalSec;
     }
-    if (this.running) {
+    if (this.running && !this.stopped) {
       this.scheduleNextTick();
     }
   }
@@ -247,10 +412,19 @@ export class PollingScheduler {
       ...this.energyConfig,
       ...next,
     };
+    if (next.slopeWindow !== undefined) {
+      this.alertEngine.updateGlobalConfig({ slopeWindow: next.slopeWindow });
+    }
   }
 
   updateAlertConfig(next: Partial<AlertRuleConfig>): void {
     this.alertEngine.updateGlobalConfig(next);
+    if (next.slopeWindow !== undefined) {
+      this.energyConfig = {
+        ...this.energyConfig,
+        slopeWindow: next.slopeWindow,
+      };
+    }
   }
 
   /** 按优先级执行标的搜索（同花顺权威优先 → 东财快速联想 → 腾讯兜底） */
@@ -281,6 +455,15 @@ export class PollingScheduler {
     }
   }
 
+  /** 手动立即刷新一次；若调度器处于运行态则顺便确保后续定时唤醒正常 */
+  async refreshNow(): Promise<MarketDashboardState> {
+    const state = await this.tickOnce();
+    if (this.running && !this.stopped) {
+      this.scheduleNextTick();
+    }
+    return state;
+  }
+
   /** 立即执行一次完整周期（初始化/跨日检查 → 按需补齐 → 交易时段拉快照或非交易时段复盘） */
   async tickOnce(): Promise<MarketDashboardState> {
     if (this.pollInFlight) {
@@ -294,41 +477,208 @@ export class PollingScheduler {
     return run;
   }
 
+  private computeNextWakeDelayMs(nowMs: number): number {
+    if (this.mode === 'LIVE') {
+      return this.effectiveIntervalSec * 1000;
+    }
+
+    const { dateStr: todayStr } = getShanghaiParts(nowMs);
+
+    if (this.lastPhase === 'PRE_MARKET') {
+      const openAuctionMs = shanghaiToTimestampMs(todayStr, 9, 15, 0);
+      const remaining = openAuctionMs - nowMs;
+      if (remaining > 0) {
+        return Math.max(1_000, Math.min(NON_TRADING_WAKE_INTERVAL_MS, remaining));
+      }
+      return 1_000;
+    }
+
+    if (this.lastPhase === 'LUNCH_BREAK') {
+      const afternoonOpenMs = shanghaiToTimestampMs(todayStr, 13, 0, 0);
+      const remaining = afternoonOpenMs - nowMs;
+      if (remaining > 0) {
+        return Math.max(1_000, Math.min(NON_TRADING_WAKE_INTERVAL_MS, remaining));
+      }
+      return 1_000;
+    }
+
+    // 工作日开盘窗内待确认今日是否开市（无 Key 降级场景）：30s 轻量检查
+    if (this.calendarNeedsTodayReprobe) {
+      return NON_TRADING_WAKE_INTERVAL_MS;
+    }
+
+    // 盘后与非交易日：零高频行情请求，仅保留纯本地时钟轻量唤醒以便跨日准点开盘
+    const nextDay = nextCalendarDate(todayStr);
+    const nextDayOpenMs = shanghaiToTimestampMs(nextDay, 9, 15, 0);
+    const remaining = nextDayOpenMs - nowMs;
+    if (remaining > 0) {
+      return Math.max(1_000, Math.min(IDLE_RECHECK_INTERVAL_MS, remaining));
+    }
+    return IDLE_RECHECK_INTERVAL_MS;
+  }
+
   private scheduleNextTick(): void {
-    if (!this.running) return;
+    if (!this.running || this.stopped) return;
     if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
     }
 
-    // 盘后与非交易日停止高频轮询，进入低功耗复盘模式（不再定时拉取快照）
-    if (this.lastPhase === 'POST_MARKET' || this.lastPhase === 'CLOSED_DAY') {
-      return;
-    }
-
-    // 午休与盘前不跑高频快照，仅做轻量唤醒检查以便开盘自动切入 LIVE
-    const delayMs =
-      this.mode === 'LIVE' ? this.effectiveIntervalSec * 1000 : NON_TRADING_WAKE_INTERVAL_MS;
-
+    const delayMs = this.computeNextWakeDelayMs(this.nowFn());
     this.timer = setTimeout(() => {
-      void this.tickOnce().finally(() => {
-        this.scheduleNextTick();
+      this.timer = null;
+      void this.onTimerWake().catch(() => {
+        // 防止定时器回调产生未捕获 Promise 拒绝
       });
     }, delayMs);
   }
 
-  private async executeTick(): Promise<MarketDashboardState> {
-    const nowMs = this.nowFn();
-    const { dateStr: todayStr } = getShanghaiParts(nowMs);
+  private async onTimerWake(): Promise<void> {
+    if (!this.running || this.stopped) return;
 
-    // 1. 首次启动或跨自然日时加载/刷新交易日历并重置日内缓存
-    if (this.initializedForDate !== todayStr) {
-      await this.initializeCalendarForDate(todayStr);
-      this.initializedForDate = todayStr;
-      this.backfilledKeys.clear();
-      this.pendingBars.clear();
-      this.latestSnapshots.clear();
+    // 非交易时段先做纯本地时钟与自选股签名快判，无变化时零网络请求直接继续休眠
+    if (this.mode !== 'LIVE' && this.latestState !== null && !this.calendarNeedsTodayReprobe) {
+      const nowMs = this.nowFn();
+      const { dateStr: todayStr } = getShanghaiParts(nowMs);
+      const nextPhase = getMarketPhase(nowMs, this.openTradingDaySet);
+      const watchlistSig = this.computeWatchlistSignature(this.db.getWatchlist());
+      if (
+        todayStr === this.initializedForDate &&
+        nextPhase === this.lastPhase &&
+        watchlistSig === this.lastWatchlistSignature
+      ) {
+        this.scheduleNextTick();
+        return;
+      }
+    }
+
+    try {
+      await this.tickOnce();
+    } finally {
+      if (this.running && !this.stopped) {
+        this.scheduleNextTick();
+      }
+    }
+  }
+
+  private computeWatchlistSignature(items: readonly WatchlistItemRow[]): string {
+    return items
+      .map(
+        (i) =>
+          `${i.symbol}:${i.sortOrder}:${i.alertEnabled ? 1 : 0}:${i.customThresholdsJson ?? ''}`
+      )
+      .join('|');
+  }
+
+  private syncDateContext(displayDate: string | null, prevDate: string | null): void {
+    if (displayDate === this.activeDisplayDate && prevDate === this.activePrevDate) {
+      return;
+    }
+
+    const displayDateChanged = displayDate !== this.activeDisplayDate;
+    this.activeDisplayDate = displayDate;
+    this.activePrevDate = prevDate;
+
+    this.todayBars.clear();
+    this.prevBars.clear();
+    this.todayAuctions.clear();
+    this.prevAuctions.clear();
+    this.pendingBars.clear();
+    this.loadedFromDbSymbols.clear();
+    this.lastBackfillAttemptAt.clear();
+    this.intradaySourceBySymbol.clear();
+    this.latestSnapshots.clear();
+    this.cybRealignedGroups.clear();
+
+    if (displayDateChanged) {
       this.alertEngine.resetCooldowns();
+      this.loadRecentAlertsFromDb(displayDate);
+    }
+  }
+
+  private loadRecentAlertsFromDb(tradeDate: string | null): void {
+    this.recentAlerts.length = 0;
+    if (!tradeDate || this.stopped) return;
+
+    const rows = this.db.getAlertEvents(tradeDate, MAX_RECENT_ALERTS);
+    for (const row of rows) {
+      this.recentAlerts.push({
+        symbol: row.symbol,
+        name: row.name,
+        tradeDate: row.tradeDate,
+        minuteIndex: row.minuteIndex,
+        direction: row.direction,
+        slope: row.slope,
+        windowMultiple: row.windowMultiple,
+        cumRatio: row.cumRatio,
+        message: row.message,
+        createdAt: row.createdAt,
+      });
+    }
+  }
+
+  private buildStoppedFallbackState(): MarketDashboardState {
+    if (this.latestState) {
+      return this.latestState;
+    }
+    return {
+      status: {
+        mode: 'IDLE',
+        phase: this.lastPhase,
+        tradeDate: this.displayTradeDate,
+        prevTradeDate: this.prevTradeDate,
+        activeSnapshotProvider: null,
+        activeIntradayProvider: this.activeIntradayProvider,
+        calendarSource: this.calendarSource,
+        calendarDegraded: this.calendarDegraded,
+        pollingIntervalSec: this.effectiveIntervalSec,
+        configuredIntervalSec: this.configuredIntervalSec,
+        lastUpdatedAt: this.lastUpdatedAt,
+        lastLatencyMs: this.lastLatencyMs,
+        consecutiveFailures: this.consecutiveFailures,
+        stale: false,
+        degraded: false,
+        degradedReasons: [],
+      },
+      marketTotal: {
+        symbol: MARKET_TOTAL_SYMBOL,
+        name: '沪深两市',
+        tradeDate: this.displayTradeDate,
+        prevTradeDate: this.prevTradeDate,
+        cumTurnover: null,
+        shTurnover: null,
+        szTurnover: null,
+        auctionTurnover: null,
+        prevAuctionTurnover: null,
+        prevFullDayTurnover: null,
+        metrics: null,
+        todaySeries: [],
+        prevSeries: [],
+        degraded: true,
+        degradedReason: 'SCHEDULER_STOPPED',
+      },
+      indices: [],
+      watchlist: [],
+      recentAlerts: [...this.recentAlerts],
+    };
+  }
+
+  private async executeTick(): Promise<MarketDashboardState> {
+    if (this.stopped) {
+      return this.buildStoppedFallbackState();
+    }
+
+    const nowMs = this.nowFn();
+    const { dateStr: todayStr, secondsOfDay } = getShanghaiParts(nowMs);
+
+    // 1. 首次启动或跨自然日时加载/刷新交易日历
+    if (this.initializedForDate !== todayStr) {
+      await this.initializeCalendarForDate(todayStr, nowMs);
+      if (this.stopped) return this.buildStoppedFallbackState();
+      this.initializedForDate = todayStr;
+    } else if (this.calendarNeedsTodayReprobe && secondsOfDay >= SEC_09_15) {
+      await this.reprobeTodayTradingStatus(todayStr, nowMs, secondsOfDay);
+      if (this.stopped) return this.buildStoppedFallbackState();
     }
 
     // 2. 判定当前市场阶段、展示交易日与运行模式
@@ -341,25 +691,35 @@ export class PollingScheduler {
     this.prevTradeDate = prevDate;
     this.mode = mode;
 
-    // 从连续交易阶段进入午休或盘后时，先落盘所有待闭合分钟线
-    if (
-      (prevPhase === 'MORNING_SESSION' || prevPhase === 'AFTERNOON_SESSION') &&
-      (phase === 'LUNCH_BREAK' || phase === 'POST_MARKET')
-    ) {
-      this.flushAllPendingBars();
-    }
+    // 若展示交易日或基线日切换（如 PRE_MARKET → OPEN_AUCTION 或跨日），彻底清理旧日内存缓存并重载当日告警
+    this.syncDateContext(displayDate, prevDate);
 
     // 3. 获取最新监控标的列表（5 指数 + 实时数据库自选股，增删无需重启）
     const watchlistItems = this.db.getWatchlist();
+    this.lastWatchlistSignature = this.computeWatchlistSignature(watchlistItems);
     const monitoredSymbols = this.collectMonitoredSymbols(watchlistItems);
     const nameLookup = this.buildNameLookup(watchlistItems);
 
-    // 4. 检查 SQLite 缓存并一次性补齐缺失的昨日 240 分钟与今日已过分钟
+    // 从连续交易阶段刚跨入午休或盘后时，补拉一次终态收盘快照捕获 11:30:03 / 15:00:03 集合竞价，再刷盘待闭合分钟
+    const justClosedSession =
+      (prevPhase === 'MORNING_SESSION' && phase === 'LUNCH_BREAK') ||
+      (prevPhase === 'AFTERNOON_SESSION' && phase === 'POST_MARKET');
+    if (justClosedSession) {
+      await this.pollLiveSnapshots(monitoredSymbols, nameLookup, nowMs, prevPhase);
+      if (this.stopped) return this.buildStoppedFallbackState();
+      this.flushAllPendingBars();
+    }
+
+    // 4. 首次从 SQLite 加载内存缓存并按需补齐缺失的昨日 240 分钟与今日已过分钟
     await this.ensureIntradayBackfilled(monitoredSymbols, nowMs, phase);
+    if (this.stopped) return this.buildStoppedFallbackState();
 
     // 5. 交易时段执行批量快照拉取与告警评估；非交易时段零高频请求，直接复盘
     if (mode === 'LIVE') {
       await this.pollLiveSnapshots(monitoredSymbols, nameLookup, nowMs, phase);
+      if (this.stopped) return this.buildStoppedFallbackState();
+      await this.maybeRealignCybIntradayBaseline();
+      if (this.stopped) return this.buildStoppedFallbackState();
     }
 
     // 6. 盘后触发一次 30 交易日滚动清理（每日最多一次）
@@ -371,13 +731,16 @@ export class PollingScheduler {
     // 7. 调用 src/core/ 引擎计算最新全量看板状态并推送回调
     const state = this.buildDashboardState(watchlistItems, nowMs, phase);
     this.latestState = state;
-    this.onStateUpdate?.(state);
+    if (!this.stopped) {
+      this.onStateUpdate?.(state);
+    }
     return state;
   }
 
-  private async initializeCalendarForDate(todayStr: string): Promise<void> {
+  private async initializeCalendarForDate(todayStr: string, nowMs: number): Promise<void> {
     const cachedSyncDate = this.db.getSetting<string>(SETTING_CALENDAR_SYNC_DATE);
     const cachedOpenDays = this.db.getTradingDays(true).map((d) => d.date);
+    this.calendarNeedsTodayReprobe = false;
 
     // 1. SQLite 当日缓存有效 → 直接使用
     if (cachedSyncDate === todayStr && cachedOpenDays.length > 0) {
@@ -389,6 +752,7 @@ export class PollingScheduler {
     if (this.hithink.isConfigured()) {
       try {
         const fetched = await this.hithink.fetchTradingDays();
+        if (this.stopped) return;
         if (fetched.length > 0) {
           this.db.upsertTradingDays(fetched);
           this.db.setSetting(SETTING_CALENDAR_SYNC_DATE, todayStr);
@@ -401,15 +765,92 @@ export class PollingScheduler {
       }
     }
 
-    // 3. 已有旧缓存 → 降级复用旧缓存
-    if (cachedOpenDays.length > 0) {
+    // 3. 若已有旧缓存且覆盖到 todayStr → 直接降级复用旧缓存
+    const maxCachedDate =
+      cachedOpenDays.length > 0 ? cachedOpenDays[cachedOpenDays.length - 1] : null;
+    if (maxCachedDate !== null && maxCachedDate >= todayStr) {
       this.setOpenTradingDays(cachedOpenDays, 'sqlite_cache', true);
       return;
     }
 
-    // 4. 无缓存且无 Key / 失败 → 由公开源 2 日分时推断最近交易日，标记日历降级
-    const inferredDates = await this.inferTradingDatesFromPublicIntraday();
-    this.setOpenTradingDays(inferredDates, 'inferred_degraded', true);
+    // 4. 无缓存或旧缓存未覆盖今日 → 结合公开分时（及工作日开盘窗内单次快照探测）推断交易日，避免误判 CLOSED_DAY
+    const inferredDates = await this.inferTradingDatesFromPublicIntraday(nowMs);
+    if (this.stopped) return;
+
+    const mergedDates = new Set<string>([...cachedOpenDays, ...inferredDates]);
+    const weekday = getDateWeekday(todayStr);
+    const isWeekday = weekday >= 1 && weekday <= 5;
+    const { secondsOfDay } = getShanghaiParts(nowMs);
+
+    if (isWeekday && !mergedDates.has(todayStr)) {
+      if (secondsOfDay >= SEC_09_15 && secondsOfDay <= SEC_15_10) {
+        const openedToday = await this.probeTodayOpenViaPublicSnapshot(todayStr);
+        if (this.stopped) return;
+        if (openedToday) {
+          mergedDates.add(todayStr);
+        } else if (secondsOfDay < SEC_09_35) {
+          this.calendarNeedsTodayReprobe = true;
+          this.lastCalendarReprobeAt = nowMs;
+        }
+      } else if (secondsOfDay < SEC_09_15) {
+        this.calendarNeedsTodayReprobe = true;
+        this.lastCalendarReprobeAt = nowMs;
+      }
+    }
+
+    this.setOpenTradingDays([...mergedDates], 'inferred_degraded', true);
+  }
+
+  private async reprobeTodayTradingStatus(
+    todayStr: string,
+    nowMs: number,
+    secondsOfDay: number
+  ): Promise<void> {
+    if (this.openTradingDaySet.has(todayStr)) {
+      this.calendarNeedsTodayReprobe = false;
+      return;
+    }
+    if (secondsOfDay > SEC_15_10) {
+      this.calendarNeedsTodayReprobe = false;
+      return;
+    }
+    if (
+      this.lastCalendarReprobeAt > 0 &&
+      nowMs - this.lastCalendarReprobeAt < CALENDAR_REPROBE_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    this.lastCalendarReprobeAt = nowMs;
+    const openedToday = await this.probeTodayOpenViaPublicSnapshot(todayStr);
+    if (this.stopped) return;
+
+    if (openedToday) {
+      this.setOpenTradingDays(
+        [...this.openTradingDays, todayStr],
+        this.calendarSource,
+        this.calendarDegraded
+      );
+      this.calendarNeedsTodayReprobe = false;
+    } else if (secondsOfDay >= SEC_09_35) {
+      // 超过 09:35 公开源仍无今日行情，判定为法定节假日休市
+      this.calendarNeedsTodayReprobe = false;
+    }
+  }
+
+  private async probeTodayOpenViaPublicSnapshot(todayStr: string): Promise<boolean> {
+    for (const provider of [this.primarySnapshot, this.secondarySnapshot]) {
+      try {
+        const snaps = await provider.fetchBatchSnapshots(['000001.SH']);
+        const sh = snaps.get('000001.SH');
+        if (sh && sh.tradeDate === todayStr) {
+          return true;
+        }
+      } catch {
+        // 尝试下一公开源
+      }
+    }
+    return false;
   }
 
   private setOpenTradingDays(
@@ -424,10 +865,12 @@ export class PollingScheduler {
     this.calendarDegraded = degraded;
   }
 
-  private async inferTradingDatesFromPublicIntraday(): Promise<string[]> {
+  private async inferTradingDatesFromPublicIntraday(nowMs: number): Promise<string[]> {
     const dayLists = await this.fetchIntradayWithFallback('000001.SH', 5);
-    if (!dayLists) return [];
+    if (!dayLists || this.stopped) return [];
     this.persistIntradayDays(dayLists);
+    this.intradaySourceBySymbol.set('000001.SH', dayLists[0].source);
+    this.lastBackfillAttemptAt.set('000001.SH', nowMs);
     return dayLists.map((d) => d.tradeDate).sort((a, b) => a.localeCompare(b));
   }
 
@@ -492,6 +935,8 @@ export class PollingScheduler {
   }
 
   private loadSymbolFromDb(symbol: string): void {
+    if (this.stopped) return;
+
     if (this.displayTradeDate) {
       this.todayBars.set(symbol, this.db.getIntradayBars(symbol, this.displayTradeDate));
       const a = this.db.getAuctionSnapshot(symbol, this.displayTradeDate);
@@ -500,8 +945,14 @@ export class PollingScheduler {
           openPrice: a.openPrice,
           auctionTurnover: a.auctionTurnover,
         });
+      } else {
+        this.todayAuctions.delete(symbol);
       }
+    } else {
+      this.todayBars.delete(symbol);
+      this.todayAuctions.delete(symbol);
     }
+
     if (this.prevTradeDate) {
       this.prevBars.set(symbol, this.db.getIntradayBars(symbol, this.prevTradeDate));
       const pa = this.db.getAuctionSnapshot(symbol, this.prevTradeDate);
@@ -510,14 +961,19 @@ export class PollingScheduler {
           openPrice: pa.openPrice,
           auctionTurnover: pa.auctionTurnover,
         });
+      } else {
+        this.prevAuctions.delete(symbol);
       }
+    } else {
+      this.prevBars.delete(symbol);
+      this.prevAuctions.delete(symbol);
     }
+
+    this.loadedFromDbSymbols.add(symbol);
   }
 
   private needsBackfill(symbol: string, nowMs: number, phase: MarketPhase): boolean {
     if (!this.displayTradeDate) return false;
-    const key = `${symbol}:${this.displayTradeDate}:${this.prevTradeDate ?? ''}`;
-    if (this.backfilledKeys.has(key)) return false;
 
     const prevList = this.prevBars.get(symbol) ?? [];
     if (this.prevTradeDate && prevList.length < TOTAL_DAY_BARS) {
@@ -527,15 +983,15 @@ export class PollingScheduler {
     const todayList = this.todayBars.get(symbol) ?? [];
     if (this.mode === 'REPLAY') {
       if (phase === 'LUNCH_BREAK') {
-        return todayList.length < 120;
+        return todayList.length < MORNING_BARS;
       }
       return todayList.length < TOTAL_DAY_BARS;
     }
 
     const currentMinuteIndex = timestampToMinuteIndex(nowMs);
     if (currentMinuteIndex !== null && currentMinuteIndex > 0) {
-      const expectedClosedCount = currentMinuteIndex; // 0 .. currentMinuteIndex-1
-      if (todayList.length < expectedClosedCount) {
+      const expectedLastClosed = currentMinuteIndex - 1;
+      if (todayList.length < currentMinuteIndex || hasSeriesGap(todayList, expectedLastClosed)) {
         return true;
       }
     }
@@ -558,12 +1014,18 @@ export class PollingScheduler {
     const missing: string[] = [];
 
     for (const sym of symbols) {
-      this.loadSymbolFromDb(sym);
-      if (this.needsBackfill(sym, nowMs, phase)) {
-        missing.push(sym);
-      } else if (this.displayTradeDate) {
-        this.backfilledKeys.add(`${sym}:${this.displayTradeDate}:${this.prevTradeDate ?? ''}`);
+      if (!this.loadedFromDbSymbols.has(sym)) {
+        this.loadSymbolFromDb(sym);
       }
+      if (!this.needsBackfill(sym, nowMs, phase)) {
+        continue;
+      }
+
+      const lastAttempt = this.lastBackfillAttemptAt.get(sym);
+      if (lastAttempt !== undefined && nowMs - lastAttempt < BACKFILL_RETRY_COOLDOWN_MS) {
+        continue;
+      }
+      missing.push(sym);
     }
 
     if (missing.length === 0) return;
@@ -571,25 +1033,56 @@ export class PollingScheduler {
     // 限制并发度为 2、批次间间隔 150ms，避免触发上游限流（docs/DATA_SOURCES.md §5.2）
     const concurrency = 2;
     for (let i = 0; i < missing.length; i += concurrency) {
+      if (this.stopped) return;
       const batch = missing.slice(i, i + concurrency);
       await Promise.all(
         batch.map(async (sym) => {
+          this.lastBackfillAttemptAt.set(sym, nowMs);
           const days = await this.fetchIntradayWithFallback(sym, 2);
+          if (this.stopped) return;
           if (days && days.length > 0) {
             this.persistIntradayDays(days);
             this.intradaySourceBySymbol.set(sym, days[0].source);
             this.loadSymbolFromDb(sym);
-            if (this.displayTradeDate) {
-              this.backfilledKeys.add(
-                `${sym}:${this.displayTradeDate}:${this.prevTradeDate ?? ''}`
-              );
-            }
           }
         })
       );
-      if (i + concurrency < missing.length && this.backfillDelayMs > 0) {
+      if (i + concurrency < missing.length && this.backfillDelayMs > 0 && !this.stopped) {
         await this.sleepFn(this.backfillDelayMs);
       }
+    }
+  }
+
+  /**
+   * 399006.SZ 跨源口径自动对齐：当 LIVE 快照与分时基线分属不同口径组时，
+   * 尝试通过目标口径组的分时源一次性重拉 2 日基线，保持「今/昨同源」。
+   */
+  private async maybeRealignCybIntradayBaseline(): Promise<void> {
+    const sym = '399006.SZ';
+    const snap = this.latestSnapshots.get(sym) ?? null;
+    if (!snap || !this.displayTradeDate || snap.tradeDate !== this.displayTradeDate) return;
+
+    const todayBars = this.todayBars.get(sym) ?? [];
+    const prevBars = this.prevBars.get(sym) ?? [];
+    if (!hasCybCrossSourceMismatch({ symbol: sym, todayBars, prevBars, liveSnap: snap })) {
+      return;
+    }
+
+    const targetGroup = getCybScopeGroup(snap.source);
+    if (!targetGroup || this.cybRealignedGroups.has(targetGroup)) return;
+    this.cybRealignedGroups.add(targetGroup);
+
+    const targetProvider =
+      targetGroup === 'tx_sina' ? this.primaryIntraday : this.secondaryIntraday;
+    try {
+      const days = await targetProvider.fetchIntradayMinutes(sym, 2);
+      if (this.stopped || days.length === 0) return;
+      this.activeIntradayProvider = targetProvider.id;
+      this.persistIntradayDays(days);
+      this.intradaySourceBySymbol.set(sym, days[0].source);
+      this.loadSymbolFromDb(sym);
+    } catch {
+      // 重拉失败时保持 CROSS_SOURCE_SCOPE_MISMATCH 安全降级，绝不混除
     }
   }
 
@@ -621,6 +1114,7 @@ export class PollingScheduler {
   }
 
   private persistIntradayDays(days: readonly IntradayDayData[]): void {
+    if (this.stopped) return;
     const nowMs = this.nowFn();
     for (const day of days) {
       if (day.bars.length > 0) {
@@ -649,14 +1143,29 @@ export class PollingScheduler {
     if (nowMs - this.lastPrimaryProbeAt < PRIMARY_RECOVERY_PROBE_INTERVAL_MS) return;
 
     this.lastPrimaryProbeAt = nowMs;
-    const health = await this.primarySnapshot.healthCheck();
-    if (health.ok) {
-      this.activeSnapshotProvider = this.primarySnapshot.id;
-      this.consecutiveFailures = 0;
-      this.effectiveIntervalSec = Math.max(
-        this.configuredIntervalSec,
-        Math.floor(this.effectiveIntervalSec / 2)
-      );
+
+    try {
+      const primaryHealth = await this.primarySnapshot.healthCheck();
+      if (primaryHealth.ok) {
+        this.activeSnapshotProvider = this.primarySnapshot.id;
+        this.consecutiveFailures = 0;
+        return;
+      }
+    } catch {
+      // 探测异常视作未恢复
+    }
+
+    // 若当前滞留在同花顺紧急低频兜底，且主源仍不可用，顺带探测第一备源（新浪）是否已恢复
+    if (this.activeSnapshotProvider === 'hithink') {
+      try {
+        const secondaryHealth = await this.secondarySnapshot.healthCheck();
+        if (secondaryHealth.ok) {
+          this.activeSnapshotProvider = this.secondarySnapshot.id;
+          this.consecutiveFailures = 0;
+        }
+      } catch {
+        // 维持当前兜底源
+      }
     }
   }
 
@@ -667,6 +1176,7 @@ export class PollingScheduler {
     phase: MarketPhase
   ): Promise<void> {
     await this.maybeProbePrimaryRecovery(nowMs);
+    if (this.stopped) return;
 
     const attemptPoll = async (providerId: ProviderId): Promise<Map<string, QuoteSnapshot>> => {
       const provider = this.getProviderById(providerId);
@@ -679,16 +1189,20 @@ export class PollingScheduler {
 
     try {
       const snapshots = await attemptPoll(this.activeSnapshotProvider);
+      if (this.stopped) return;
       this.handlePollSuccess(snapshots, nowMs, phase);
       return;
     } catch (err) {
+      if (this.stopped) return;
       const switched = this.handlePollFailure(err, nowMs);
       if (switched) {
         // 刚刚触发主备切换时立即用新备源补拉一次，避免多等一个周期
         try {
           const fallbackSnapshots = await attemptPoll(this.activeSnapshotProvider);
+          if (this.stopped) return;
           this.handlePollSuccess(fallbackSnapshots, nowMs, phase);
         } catch (fallbackErr) {
+          if (this.stopped) return;
           this.handlePollFailure(fallbackErr, nowMs);
         }
       }
@@ -714,6 +1228,8 @@ export class PollingScheduler {
       );
     }
 
+    const { secondsOfDay: nowSecOfDay } = getShanghaiParts(nowMs);
+
     for (const [symbol, snap] of snapshots) {
       this.latestSnapshots.set(symbol, snap);
 
@@ -722,26 +1238,45 @@ export class PollingScheduler {
       }
 
       // 仅在 09:25–09:29 集合竞价间隙捕获开盘集合竞价并落盘 auction_snapshots
-      // （盘中连续竞价阶段不可把累计成交额误存为开盘竞价额）
-      if (phase === 'AUCTION_GAP' && !this.todayAuctions.has(symbol) && snap.turnover > 0) {
-        const auction = {
-          openPrice: snap.open > 0 ? snap.open : snap.price,
-          auctionTurnover: snap.turnover,
-        };
-        this.todayAuctions.set(symbol, auction);
-        this.db.upsertAuctionSnapshot({
-          symbol,
-          tradeDate: this.displayTradeDate,
-          openPrice: auction.openPrice,
-          auctionTurnover: auction.auctionTurnover,
-          capturedAt: nowMs,
-        });
+      // 允许 09:25 期间随终态修正更新；冷门股 09:26 后真实零成交也允许落盘 0
+      if (phase === 'AUCTION_GAP') {
+        const snapParts = getShanghaiParts(snap.timestampMs);
+        if (snapParts.secondsOfDay >= SEC_09_25) {
+          const existingAuction = this.todayAuctions.get(symbol);
+          const shouldRecord =
+            (!existingAuction && (snap.turnover > 0 || nowSecOfDay >= SEC_09_26)) ||
+            (existingAuction !== undefined && snap.turnover > existingAuction.auctionTurnover);
+          if (shouldRecord) {
+            const auction = {
+              openPrice: snap.open > 0 ? snap.open : snap.price,
+              auctionTurnover: snap.turnover,
+            };
+            this.todayAuctions.set(symbol, auction);
+            this.db.upsertAuctionSnapshot({
+              symbol,
+              tradeDate: this.displayTradeDate,
+              openPrice: auction.openPrice,
+              auctionTurnover: auction.auctionTurnover,
+              capturedAt: nowMs,
+            });
+          }
+        }
       }
 
-      // 连续竞价阶段维护分钟聚合并在分钟闭合时落盘 intraday_bars
-      const minuteIndex = timestampToMinuteIndex(snap.timestampMs);
-      if (minuteIndex === null) continue;
+      // 399006.SZ 禁止将与昨日基线不同口径的快照写入 intraday_bars（防止污染当日序列）
+      if (symbol === '399006.SZ') {
+        const prevGroup = getCybScopeGroup(this.prevBars.get(symbol)?.[0]?.source);
+        const snapGroup = getCybScopeGroup(snap.source);
+        if (prevGroup && snapGroup && prevGroup !== snapGroup) {
+          continue;
+        }
+      }
 
+      // 连续竞价阶段维护分钟聚合并在分钟闭合时落盘 intraday_bars（含 11:30:xx / 15:00:xx 收盘延迟推送）
+      const resolvedMinute = resolveSnapshotMinute(snap.timestampMs);
+      if (!resolvedMinute) continue;
+
+      const { minuteIndex, elapsedSeconds } = resolvedMinute;
       const prevPending = this.pendingBars.get(symbol);
       if (prevPending && prevPending.minuteIndex < minuteIndex) {
         this.persistClosedPendingBar(symbol, prevPending);
@@ -756,8 +1291,8 @@ export class PollingScheduler {
       };
       this.pendingBars.set(symbol, nextPending);
 
-      // 11:30:00 或 15:00:00 闭合点立即落盘
-      if (getElapsedSecondsInMinute(snap.timestampMs) === 60) {
+      // 11:30 或 15:00 闭合点立即落盘
+      if (elapsedSeconds === 60) {
         this.persistClosedPendingBar(symbol, nextPending);
         this.pendingBars.delete(symbol);
       }
@@ -810,7 +1345,7 @@ export class PollingScheduler {
   }
 
   private persistClosedPendingBar(symbol: string, pending: PendingMinuteBar): void {
-    if (!this.displayTradeDate) return;
+    if (!this.displayTradeDate || this.stopped) return;
 
     const existing = this.todayBars.get(symbol) ?? [];
     const prevBar = existing.find((b) => b.minuteIndex === pending.minuteIndex - 1);
@@ -864,6 +1399,35 @@ export class PollingScheduler {
     this.pendingBars.clear();
   }
 
+  private isLiveSnapshotStale(nowMs: number, phase: MarketPhase): boolean {
+    if (this.mode !== 'LIVE') return false;
+
+    const pollStaleThresholdMs = Math.max(15_000, this.effectiveIntervalSec * 3_000);
+    if (this.lastUpdatedAt === null || nowMs - this.lastUpdatedAt > pollStaleThresholdMs) {
+      return true;
+    }
+
+    // 连续竞价阶段同时校验核心行情自带时间戳，捕获上游冻结返回过期数据的场景
+    if (phase === 'MORNING_SESSION' || phase === 'AFTERNOON_SESSION') {
+      const upstreamStaleThresholdMs = Math.max(
+        UPSTREAM_SNAPSHOT_STALE_MIN_MS,
+        this.effectiveIntervalSec * 4_000
+      );
+      for (const sym of MARKET_TOTAL_COMPONENTS) {
+        const snap = this.latestSnapshots.get(sym);
+        if (!snap) continue;
+        if (this.displayTradeDate && snap.tradeDate !== this.displayTradeDate) {
+          return true;
+        }
+        if (nowMs - snap.timestampMs > upstreamStaleThresholdMs) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   private buildDashboardState(
     watchlistItems: readonly WatchlistItemRow[],
     nowMs: number,
@@ -881,11 +1445,22 @@ export class PollingScheduler {
       degradedReasons.push(`SNAPSHOT_FAILURES_${this.consecutiveFailures}`);
     }
 
+    const stale = this.isLiveSnapshotStale(nowMs, phase);
+    if (stale) {
+      degradedReasons.push('DATA_STALE');
+    }
+
     const currentMinuteIndex = timestampToMinuteIndex(nowMs);
     const currentElapsedSec = getElapsedSecondsInMinute(nowMs) ?? 60;
 
     // 1. 计算沪深两市总成交额（严格使用 000001.SH + 399106.SZ）
-    const marketTotal = this.buildMarketTotalState(nowMs, currentMinuteIndex, currentElapsedSec);
+    const marketTotal = this.buildMarketTotalState(
+      nowMs,
+      phase,
+      currentMinuteIndex,
+      currentElapsedSec,
+      stale
+    );
     if (marketTotal.degraded) {
       degradedReasons.push(`MARKET_TOTAL_${marketTotal.degradedReason ?? 'DEGRADED'}`);
     }
@@ -900,8 +1475,10 @@ export class PollingScheduler {
         scopeDetail: meta.scopeDetail,
         symbolOverride: null,
         nowMs,
+        phase,
         currentMinuteIndex,
         currentElapsedSec,
+        globalStale: stale,
       })
     );
 
@@ -913,18 +1490,12 @@ export class PollingScheduler {
         isIndex: false,
         symbolOverride: parseWatchlistOverride(item),
         nowMs,
+        phase,
         currentMinuteIndex,
         currentElapsedSec,
+        globalStale: stale,
       })
     );
-
-    const staleThresholdMs = Math.max(15_000, this.effectiveIntervalSec * 3_000);
-    const stale =
-      this.mode === 'LIVE' &&
-      (this.lastUpdatedAt === null || nowMs - this.lastUpdatedAt > staleThresholdMs);
-    if (stale) {
-      degradedReasons.push('DATA_STALE');
-    }
 
     const status: CollectorStatus = {
       mode: this.mode,
@@ -954,10 +1525,24 @@ export class PollingScheduler {
     };
   }
 
+  private expectedTodayLastClosedIndex(
+    phase: MarketPhase,
+    evalMinuteIndex: number | null
+  ): number | null {
+    if (this.mode === 'REPLAY') {
+      if (phase === 'LUNCH_BREAK') return MORNING_BARS - 1;
+      return TOTAL_DAY_BARS - 1;
+    }
+    if (evalMinuteIndex === null) return null;
+    return evalMinuteIndex - 1;
+  }
+
   private buildMarketTotalState(
     nowMs: number,
+    phase: MarketPhase,
     currentMinuteIndex: number | null,
-    currentElapsedSec: number
+    currentElapsedSec: number,
+    globalStale: boolean
   ): MarketTotalState {
     const [shSym, szSym] = MARKET_TOTAL_COMPONENTS;
     const shTodayBars = this.todayBars.get(shSym) ?? [];
@@ -965,8 +1550,14 @@ export class PollingScheduler {
     const shPrevBars = this.prevBars.get(shSym) ?? [];
     const szPrevBars = this.prevBars.get(szSym) ?? [];
 
-    const todayAggSeries = aggregateMarketTotalSeries(shTodayBars, szTodayBars);
-    const prevAggSeries = aggregateMarketTotalSeries(shPrevBars, szPrevBars);
+    const todayAggSeries = aggregateMarketTotalSeries(
+      toAggregatorBars(shTodayBars),
+      toAggregatorBars(szTodayBars)
+    );
+    const prevAggSeries = aggregateMarketTotalSeries(
+      toAggregatorBars(shPrevBars),
+      toAggregatorBars(szPrevBars)
+    );
 
     const todayAuctionInputs = [shSym, szSym]
       .map((sym) => {
@@ -998,10 +1589,9 @@ export class PollingScheduler {
     let szTurnover: number | null = null;
     let degraded = false;
     let degradedReason: string | null = null;
+    let alertDegraded = globalStale;
     let evalMinuteIndex: number | null = null;
     let evalElapsedSec = 60;
-
-    const seriesHasGap = hasMinuteGap(todayAggSeries.bars) || hasMinuteGap(prevAggSeries.bars);
 
     if (this.mode === 'LIVE') {
       const shSnap = this.latestSnapshots.get(shSym);
@@ -1011,7 +1601,7 @@ export class PollingScheduler {
         snapInputs.push({
           symbol: shSnap.symbol,
           tradeDate: shSnap.tradeDate,
-          minuteIndex: timestampToMinuteIndex(shSnap.timestampMs),
+          minuteIndex: resolveSnapshotMinute(shSnap.timestampMs)?.minuteIndex ?? null,
           timestampMs: shSnap.timestampMs,
           cumTurnover: shSnap.turnover,
         });
@@ -1020,7 +1610,7 @@ export class PollingScheduler {
         snapInputs.push({
           symbol: szSnap.symbol,
           tradeDate: szSnap.tradeDate,
-          minuteIndex: timestampToMinuteIndex(szSnap.timestampMs),
+          minuteIndex: resolveSnapshotMinute(szSnap.timestampMs)?.minuteIndex ?? null,
           timestampMs: szSnap.timestampMs,
           cumTurnover: szSnap.turnover,
         });
@@ -1030,17 +1620,25 @@ export class PollingScheduler {
       cumTurnover = aggSnap.cumTurnover;
       shTurnover = aggSnap.shTurnover;
       szTurnover = aggSnap.szTurnover;
-      degraded =
-        aggSnap.degraded ||
-        todayAggSeries.missingShMinutes.length > 0 ||
-        todayAggSeries.missingSzMinutes.length > 0 ||
-        seriesHasGap;
-      degradedReason = aggSnap.reason ?? (seriesHasGap ? 'SERIES_GAP' : null);
       evalMinuteIndex = aggSnap.minuteIndex ?? currentMinuteIndex;
       evalElapsedSec =
         aggSnap.timestampMs !== null
-          ? (getElapsedSecondsInMinute(aggSnap.timestampMs) ?? currentElapsedSec)
+          ? (resolveSnapshotMinute(aggSnap.timestampMs)?.elapsedSeconds ?? currentElapsedSec)
           : currentElapsedSec;
+
+      if (aggSnap.degraded) {
+        degraded = true;
+        degradedReason = aggSnap.reason;
+        alertDegraded = true;
+      }
+
+      if (
+        todayAggSeries.missingShMinutes.length > 0 ||
+        todayAggSeries.missingSzMinutes.length > 0
+      ) {
+        degraded = true;
+        degradedReason = degradedReason ?? 'SERIES_INCOMPLETE';
+      }
     } else {
       // REPLAY 模式：采用最新已聚合收盘分钟
       const lastBar =
@@ -1050,17 +1648,33 @@ export class PollingScheduler {
       cumTurnover = lastBar?.cumTurnover ?? null;
       shTurnover = lastBar?.shCumTurnover ?? null;
       szTurnover = lastBar?.szCumTurnover ?? null;
-      degraded = todayAggSeries.degraded || seriesHasGap || lastBar === null;
-      degradedReason =
-        lastBar === null
-          ? 'NO_SERIES_DATA'
-          : todayAggSeries.degraded
-            ? 'SERIES_INCOMPLETE'
-            : seriesHasGap
-              ? 'SERIES_GAP'
-              : null;
       evalMinuteIndex = lastBar?.minuteIndex ?? null;
       evalElapsedSec = 60;
+
+      if (lastBar === null) {
+        degraded = true;
+        degradedReason = 'NO_SERIES_DATA';
+        alertDegraded = true;
+      } else if (todayAggSeries.degraded) {
+        degraded = true;
+        degradedReason = 'SERIES_INCOMPLETE';
+      }
+    }
+
+    const expectedTodayLast = this.expectedTodayLastClosedIndex(phase, evalMinuteIndex);
+    const todaySeriesHasGap = hasSeriesGap(todayAggSeries.bars, expectedTodayLast);
+    const prevSeriesMissing = prevAggSeries.bars.length === 0;
+    const prevSeriesIncomplete =
+      !prevSeriesMissing &&
+      (prevAggSeries.degraded || hasSeriesGap(prevAggSeries.bars, TOTAL_DAY_BARS - 1));
+
+    if (prevSeriesMissing) {
+      degraded = true;
+      degradedReason = degradedReason ?? 'MISSING_PREV_BASELINE';
+      alertDegraded = true;
+    } else if (todaySeriesHasGap || prevSeriesIncomplete) {
+      degraded = true;
+      degradedReason = degradedReason ?? (todaySeriesHasGap ? 'SERIES_GAP' : 'PREV_SERIES_INCOMPLETE');
     }
 
     const alertCfg = resolveAlertConfig(this.alertEngine.getGlobalConfig());
@@ -1088,7 +1702,7 @@ export class PollingScheduler {
         tradeDate: this.displayTradeDate,
         timestampMs: nowMs,
         metrics,
-        degraded,
+        degraded: alertDegraded,
       });
     }
 
@@ -1127,8 +1741,10 @@ export class PollingScheduler {
     scopeDetail?: string;
     symbolOverride: SymbolAlertOverride | null;
     nowMs: number;
+    phase: MarketPhase;
     currentMinuteIndex: number | null;
     currentElapsedSec: number;
+    globalStale: boolean;
   }): SymbolEnergySnapshot {
     const { symbol, name } = params;
     const todaySeries = this.todayBars.get(symbol) ?? [];
@@ -1140,17 +1756,17 @@ export class PollingScheduler {
 
     const snap = this.latestSnapshots.get(symbol) ?? null;
 
-    // 399006.SZ 跨源口径防跳变检查（docs/DATA_SOURCES.md §2.2）
-    const intradaySource = this.intradaySourceBySymbol.get(symbol) ?? prevSeries[0]?.source ?? null;
-    const crossSourceMismatch =
-      symbol === '399006.SZ' &&
-      snap !== null &&
-      intradaySource !== null &&
-      ((intradaySource === 'tencent' && (snap.source === 'eastmoney' || snap.source === 'hithink')) ||
-        (intradaySource === 'eastmoney' && (snap.source === 'tencent' || snap.source === 'sina')));
+    // 399006.SZ 跨源口径防跳变检查（同时覆盖 LIVE 与 REPLAY）
+    const crossSourceMismatch = hasCybCrossSourceMismatch({
+      symbol,
+      todayBars: todaySeries,
+      prevBars: prevSeries,
+      liveSnap: this.mode === 'LIVE' ? snap : null,
+    });
 
     let degraded = false;
     let degradedReason: string | null = null;
+    let alertDegraded = params.globalStale;
     let evalMinuteIndex: number | null = null;
     let evalTodayTurnover: number | null = null;
     let evalElapsedSec = 60;
@@ -1159,19 +1775,27 @@ export class PollingScheduler {
       if (!snap || (this.displayTradeDate && snap.tradeDate !== this.displayTradeDate)) {
         degraded = true;
         degradedReason = 'MISSING_OR_STALE_SNAPSHOT';
+        alertDegraded = true;
       } else if (crossSourceMismatch) {
         degraded = true;
         degradedReason = 'CROSS_SOURCE_SCOPE_MISMATCH';
+        alertDegraded = true;
       } else {
-        evalMinuteIndex = timestampToMinuteIndex(snap.timestampMs) ?? params.currentMinuteIndex;
+        const resolved = resolveSnapshotMinute(snap.timestampMs);
+        evalMinuteIndex = resolved?.minuteIndex ?? params.currentMinuteIndex;
         evalTodayTurnover = snap.turnover;
-        evalElapsedSec = getElapsedSecondsInMinute(snap.timestampMs) ?? params.currentElapsedSec;
+        evalElapsedSec = resolved?.elapsedSeconds ?? params.currentElapsedSec;
       }
     } else {
       const lastBar = todaySeries.length > 0 ? todaySeries[todaySeries.length - 1] : null;
       if (!lastBar) {
         degraded = true;
         degradedReason = 'NO_SERIES_DATA';
+        alertDegraded = true;
+      } else if (crossSourceMismatch) {
+        degraded = true;
+        degradedReason = 'CROSS_SOURCE_SCOPE_MISMATCH';
+        alertDegraded = true;
       } else {
         evalMinuteIndex = lastBar.minuteIndex;
         evalTodayTurnover = lastBar.cumTurnover;
@@ -1179,10 +1803,15 @@ export class PollingScheduler {
       }
     }
 
+    const expectedTodayLast = this.expectedTodayLastClosedIndex(params.phase, evalMinuteIndex);
     if (prevSeries.length === 0) {
       degraded = true;
       degradedReason = degradedReason ?? 'MISSING_PREV_BASELINE';
-    } else if (hasMinuteGap(todaySeries) || hasMinuteGap(prevSeries)) {
+      alertDegraded = true;
+    } else if (
+      hasSeriesGap(todaySeries, expectedTodayLast) ||
+      hasSeriesGap(prevSeries, TOTAL_DAY_BARS - 1)
+    ) {
       degraded = true;
       degradedReason = degradedReason ?? 'MISSING_MINUTES';
     }
@@ -1212,7 +1841,7 @@ export class PollingScheduler {
         tradeDate: this.displayTradeDate,
         timestampMs: params.nowMs,
         metrics,
-        degraded,
+        degraded: alertDegraded,
         symbolOverride: params.symbolOverride,
       });
     }

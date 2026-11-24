@@ -7,12 +7,30 @@ import {
   TencentProvider,
   parseEastmoneyIntradayResponse,
   parseEastmoneySearchResponse,
+  parseEastmoneySnapshotResponse,
+  parseHithinkSearchResults,
+  parseHithinkSnapshotData,
   parseSinaSnapshotResponse,
   parseTencentIntradayResponse,
   parseTencentSearchResponse,
   parseTencentSnapshotResponse,
   type FetchLike,
 } from '../../src/main/providers';
+
+// "上证指数" 的真实 GB18030 字节编码
+const GB18030_SH_INDEX_NAME = Buffer.from([0xc9, 0xcf, 0xd6, 0xa4, 0xd6, 0xb8, 0xca, 0xfd]);
+
+function encodeAsciiWithGb18030Name(templateWithPlaceholder: string): Buffer {
+  const parts = templateWithPlaceholder.split('__GB_NAME__');
+  const buffers: Buffer[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    buffers.push(Buffer.from(parts[i], 'ascii'));
+    if (i < parts.length - 1) {
+      buffers.push(GB18030_SH_INDEX_NAME);
+    }
+  }
+  return Buffer.concat(buffers);
+}
 
 function buildTencentLine(params: {
   txCode: string;
@@ -205,6 +223,107 @@ describe('TencentProvider parsers & HTTP', () => {
       rateLimited: true,
     });
   });
+
+  it('decodes real GB18030 Chinese names, rejects empty turnover without zero-fill, and chunks >50 symbols', async () => {
+    // 1. 真实 GB18030 字节流解码验证
+    const gbPayload = encodeAsciiWithGb18030Name(
+      buildTencentLine({
+        txCode: 'sh000001',
+        name: '__GB_NAME__',
+        code: '000001',
+        price: '3548.37',
+        prevClose: '3538.95',
+        open: '3567.84',
+        volHands: '493526296',
+        timeStr: '20261124150003',
+        changeAmt: '9.42',
+        changePct: '0.27',
+        high: '3585.22',
+        low: '3539.01',
+        f35: '3548.37/493526296/771861010309',
+        f37Wan: '77186101',
+      })
+    );
+    const gbFetch: FetchLike = vi.fn(async () => new Response(new Uint8Array(gbPayload), { status: 200 }));
+    const gbProvider = new TencentProvider({ fetchImpl: gbFetch });
+    const gbSnaps = await gbProvider.fetchBatchSnapshots(['000001.SH']);
+    expect(gbSnaps.get('000001.SH')?.name).toBe('上证指数');
+
+    // 2. 空成交额 / 空价格绝不静默补零
+    const emptyLine = buildTencentLine({
+      txCode: 'sh600519',
+      name: '贵州茅台',
+      code: '600519',
+      price: '1460.00',
+      prevClose: '1450.00',
+      open: '1455.00',
+      volHands: '100',
+      timeStr: '20261124103000',
+      changeAmt: '10.00',
+      changePct: '0.69',
+      high: '1465.00',
+      low: '1450.00',
+      f35: '1460.00/100/',
+      f37Wan: '',
+    });
+    expect(parseTencentSnapshotResponse(emptyLine).size).toBe(0);
+
+    // 3. 乱序分时记录先排序再计算单分钟增量
+    const outOfOrderPayload = {
+      data: {
+        sh600519: {
+          data: [
+            {
+              date: '20261124',
+              prec: '1450.00',
+              data: [
+                '0932 1435.00 2263 323477500.00',
+                '0931 1430.00 1763 251727500.00',
+                '0930 1425.00 763 108727500.00',
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const days = parseTencentIntradayResponse(outOfOrderPayload, '600519.SH', 1);
+    expect(days[0].bars.map((b) => b.minuteIndex)).toEqual([0, 1]);
+    expect(days[0].bars[0].barTurnover).toBeCloseTo(143_000_000, 2);
+    expect(days[0].bars[1].barTurnover).toBeCloseTo(71_750_000, 2);
+
+    // 4. >50 标的自动按 50 分批请求
+    const symbols55 = Array.from({ length: 55 }, (_, i) => `${String(600000 + i)}.SH`);
+    const batchUrls: string[] = [];
+    const batchFetch: FetchLike = vi.fn(async (url) => {
+      batchUrls.push(String(url));
+      const codes = String(url).split('q=')[1].split(',');
+      const body = codes
+        .map((code) =>
+          buildTencentLine({
+            txCode: code,
+            name: code,
+            code: code.slice(2),
+            price: '10.00',
+            prevClose: '10.00',
+            open: '10.00',
+            volHands: '100',
+            timeStr: '20261124103000',
+            changeAmt: '0',
+            changePct: '0',
+            high: '10.00',
+            low: '10.00',
+            f35: '10.00/100/100000',
+            f37Wan: '10',
+          })
+        )
+        .join('\n');
+      return new Response(body, { status: 200 });
+    });
+    const batchProvider = new TencentProvider({ fetchImpl: batchFetch });
+    const merged = await batchProvider.fetchBatchSnapshots(symbols55);
+    expect(batchUrls).toHaveLength(2);
+    expect(merged.size).toBe(55);
+  });
 });
 
 describe('SinaProvider parsers & HTTP', () => {
@@ -263,33 +382,49 @@ describe('SinaProvider parsers & HTTP', () => {
     expect(map.get('600519.SH')?.turnover).toBe(6_214_192_454);
   });
 
-  it('sends required finance.sina.com.cn Referer header', async () => {
+  it('sends required finance.sina.com.cn Referer header, decodes GB18030, and rejects empty turnover', async () => {
     let capturedReferer = '';
+    const gbPayload = encodeAsciiWithGb18030Name(
+      buildSinaLine({
+        sinaCode: 'sh000001',
+        name: '__GB_NAME__',
+        open: '3567.84',
+        prevClose: '3538.95',
+        price: '3548.37',
+        high: '3585.22',
+        low: '3539.01',
+        volume: '493526296',
+        turnoverYuan: '771861010309',
+        dateStr: '2026-11-24',
+        timeStr: '15:00:03',
+      })
+    );
     const mockFetch: FetchLike = vi.fn(async (_url, init) => {
       const headers = init?.headers as Record<string, string>;
       capturedReferer = headers?.Referer ?? '';
-      return new Response(
-        buildSinaLine({
-          sinaCode: 'sh000001',
-          name: '上证指数',
-          open: '3567.84',
-          prevClose: '3538.95',
-          price: '3548.37',
-          high: '3585.22',
-          low: '3539.01',
-          volume: '493526296',
-          turnoverYuan: '771861010309',
-          dateStr: '2026-11-24',
-          timeStr: '15:00:03',
-        }),
-        { status: 200 }
-      );
+      return new Response(new Uint8Array(gbPayload), { status: 200 });
     });
 
     const provider = new SinaProvider({ fetchImpl: mockFetch });
     const res = await provider.fetchBatchSnapshots(['000001.SH']);
     expect(capturedReferer).toBe('https://finance.sina.com.cn/');
+    expect(res.get('000001.SH')?.name).toBe('上证指数');
     expect(res.get('000001.SH')?.turnover).toBe(771_861_010_309);
+
+    const emptyTurnoverLine = buildSinaLine({
+      sinaCode: 'sh600519',
+      name: '贵州茅台',
+      open: '1450.00',
+      prevClose: '1450.00',
+      price: '1460.00',
+      high: '1465.00',
+      low: '1450.00',
+      volume: '100',
+      turnoverYuan: '',
+      dateStr: '2026-11-24',
+      timeStr: '10:30:00',
+    });
+    expect(parseSinaSnapshotResponse(emptyTurnoverLine).size).toBe(0);
   });
 });
 
@@ -319,8 +454,45 @@ describe('EastmoneyProvider parsers', () => {
     expect(days[0].bars.map((b) => b.minuteIndex)).toEqual([0, 120]);
     expect(days[0].bars[0].cumTurnover).toBeCloseTo(51_344_944_640.4, 2);
     expect(days[0].bars[0].barTurnover).toBeCloseTo(38_616_172_951.9, 2);
+    expect(days[0].prevClose).toBe(3538.95);
     expect(days[1].tradeDate).toBe('2026-11-23');
+    // 历史日期不错误套用最新日的 data.preClose
+    expect(days[1].prevClose).toBeNull();
     expect(days[1].bars[0].price).toBe(3525);
+  });
+
+  it('parses Eastmoney batch snapshot payload and rejects suspended/empty turnover entries', () => {
+    const payload = {
+      data: {
+        diff: [
+          {
+            f12: '000001',
+            f13: 1,
+            f14: '上证指数',
+            f2: 3548.37,
+            f3: 0.27,
+            f4: 9.42,
+            f5: 493526296,
+            f6: 771861010309,
+            f15: 3585.22,
+            f16: 3539.01,
+            f17: 3567.84,
+            f18: 3538.95,
+            f124: 1795503600,
+          },
+          // 停牌/缺失成交额绝不补零
+          { f12: '600519', f13: 1, f14: '停牌测试', f2: '-', f6: '', f124: 1795503600 },
+          { f12: '300750', f13: 0, f14: '空额测试', f2: 227.37, f6: null, f124: 1795503600 },
+        ],
+      },
+    };
+    const snaps = parseEastmoneySnapshotResponse(payload);
+    expect(snaps.size).toBe(1);
+    const sh = snaps.get('000001.SH')!;
+    expect(sh.name).toBe('上证指数');
+    expect(sh.turnover).toBe(771_861_010_309);
+    expect(sh.volumeShares).toBe(49_352_629_600);
+    expect(sh.source).toBe('eastmoney');
   });
 
   it('parses Eastmoney suggest search results accurately', () => {
@@ -496,5 +668,69 @@ describe('HithinkProvider security, parsing & code=4001 backoff', () => {
     expect((caught as ProviderRequestError).apiCode).toBe(4001);
     expect((caught as ProviderRequestError).rateLimited).toBe(true);
     expect(String(caught)).not.toContain(secret);
+  });
+
+  it('parses ticker search results, rejects empty turnover, and chunks >50 stock snapshots', async () => {
+    const searchItems = parseHithinkSearchResults(
+      {
+        item: [
+          { thscode: '600519.SH', ticker: '600519', name: '贵州茅台', exchange: 'SH', asset_type: 'stock' },
+          { thscode: '000001.SH', ticker: '000001', name: '上证指数', exchange: 'SH', asset_type: 'index' },
+          { thscode: '830799.BJ', ticker: '830799', name: '北证测试', exchange: 'BJ', asset_type: 'stock' },
+          { thscode: '600519.SH', ticker: '600519', name: '重复项', exchange: 'SH', asset_type: 'stock' },
+        ],
+      },
+      10
+    );
+    expect(searchItems).toEqual([
+      { symbol: '600519.SH', ticker: '600519', name: '贵州茅台', exchange: 'SH', assetType: 'STOCK', source: 'hithink' },
+      { symbol: '000001.SH', ticker: '000001', name: '上证指数', exchange: 'SH', assetType: 'INDEX', source: 'hithink' },
+    ]);
+
+    const emptyTurnoverSnaps = parseHithinkSnapshotData(
+      {
+        timestamp: 1795503600000,
+        item: [
+          { thscode: '600519.SH', last_price: 1460, turnover: '' },
+          { thscode: '300750.SZ', last_price: 227, turnover: null as unknown as number },
+        ],
+      },
+      1795503600000
+    );
+    expect(emptyTurnoverSnaps.size).toBe(0);
+
+    // >50 只个股按 50 分批请求
+    const stock55 = Array.from({ length: 55 }, (_, i) => `${String(600000 + i)}.SH`);
+    const capturedUrls: string[] = [];
+    const mockFetch: FetchLike = vi.fn(async (url) => {
+      capturedUrls.push(String(url));
+      const encoded = String(url).split('thscodes=')[1] ?? '';
+      const syms = decodeURIComponent(encoded).split(',');
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: 'ok',
+          data: {
+            timestamp: 1795503600000,
+            item: syms.map((s) => ({
+              thscode: s,
+              last_price: 10,
+              price_change_ratio_pct: 0,
+              volume: 1000,
+              turnover: 10000,
+            })),
+          },
+        }),
+        { status: 200 }
+      );
+    });
+    const provider = new HithinkProvider({
+      secretStore: { getApiKey: () => 'chunk-test-key' },
+      fetchImpl: mockFetch,
+      sleepImpl: async () => {},
+    });
+    const merged = await provider.fetchBatchSnapshots(stock55);
+    expect(capturedUrls).toHaveLength(2);
+    expect(merged.size).toBe(55);
   });
 });

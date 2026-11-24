@@ -684,4 +684,588 @@ describe('PollingScheduler', () => {
 
     db.close();
   });
+
+  it('clears previous-day auction cache across PRE_MARKET -> AUCTION_GAP and captures & updates 09:25 auction', async () => {
+    const db = new AppDatabase(':memory:');
+    db.upsertTradingDays([
+      { date: '2026-11-20', isOpen: true },
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    db.setSetting('calendar.lastSyncedDate', '2026-11-24');
+
+    for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000688.SH']) {
+      db.upsertIntradayBars(
+        makeIntradayDay({ symbol: sym, tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 1e9, auctionTurnover: 10e9 }).bars
+      );
+      db.upsertIntradayBars(
+        makeIntradayDay({ symbol: sym, tradeDate: '2026-11-20', barCount: 240, baseTurnoverPerMin: 1e9, auctionTurnover: 8e9 }).bars
+      );
+      db.upsertAuctionSnapshot({ symbol: sym, tradeDate: '2026-11-23', openPrice: 3500, auctionTurnover: 10e9, capturedAt: 1 });
+      db.upsertAuctionSnapshot({ symbol: sym, tradeDate: '2026-11-20', openPrice: 3480, auctionTurnover: 8e9, capturedAt: 1 });
+    }
+
+    let nowMs = shanghaiToTimestampMs('2026-11-24', 9, 0, 0); // PRE_MARKET
+    let auctionTurnover = 25e9;
+    const primary = createFakeProvider('tencent', {
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-24', timestampMs: nowMs, turnover: auctionTurnover }));
+        }
+        return m;
+      }),
+    });
+
+    const scheduler = new PollingScheduler({
+      database: db,
+      primarySnapshotProvider: primary,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: primary,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowMs,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    // 09:00 盘前复盘昨日，加载了 2026-11-23 的竞价 10e9
+    const sPre = await scheduler.tickOnce();
+    expect(sPre.status.phase).toBe('PRE_MARKET');
+    expect(sPre.indices[0].auctionTurnover).toBe(10e9);
+
+    // 09:25:10 进入 AUCTION_GAP：昨日竞价绝不可污染今日，应真实落盘 25e9
+    nowMs = shanghaiToTimestampMs('2026-11-24', 9, 25, 10);
+    const sGap1 = await scheduler.tickOnce();
+    expect(sGap1.status.phase).toBe('AUCTION_GAP');
+    expect(db.getAuctionSnapshot('000001.SH', '2026-11-24')?.auctionTurnover).toBe(25e9);
+    expect(sGap1.indices[0].auctionTurnover).toBe(25e9);
+    expect(sGap1.indices[0].prevAuctionTurnover).toBe(10e9);
+
+    // 09:25:18 上游终态修正为 26e9 时同步更新竞价落盘
+    nowMs = shanghaiToTimestampMs('2026-11-24', 9, 25, 18);
+    auctionTurnover = 26e9;
+    const sGap2 = await scheduler.tickOnce();
+    expect(db.getAuctionSnapshot('000001.SH', '2026-11-24')?.auctionTurnover).toBe(26e9);
+    expect(sGap2.indices[0].auctionTurnover).toBe(26e9);
+
+    db.close();
+  });
+
+  it('recovers next trading day when stale SQLite calendar cache lags behind today or when starting pre-open without Hithink key', async () => {
+    // 场景 A：昨日缓存的同花顺日历仅覆盖到 2026-11-24，次日 2026-11-25 无 Key 盘中启动不应误判 CLOSED_DAY
+    const dbA = new AppDatabase(':memory:');
+    dbA.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    dbA.setSetting('calendar.lastSyncedDate', '2026-11-24');
+
+    const nowA = shanghaiToTimestampMs('2026-11-25', 10, 30, 0);
+    const primaryA = createFakeProvider('tencent', {
+      fetchIntradayMinutes: vi.fn(async (symbol) => [
+        makeIntradayDay({ symbol, tradeDate: '2026-11-25', barCount: 60, baseTurnoverPerMin: 2e9 }),
+        makeIntradayDay({ symbol, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 2e9 }),
+      ]),
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-25', timestampMs: nowA, turnover: 122e9 }));
+        }
+        return m;
+      }),
+    });
+
+    const schedulerA = new PollingScheduler({
+      database: dbA,
+      primarySnapshotProvider: primaryA,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: primaryA,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowA,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const stA = await schedulerA.tickOnce();
+    expect(stA.status.phase).toBe('MORNING_SESSION');
+    expect(stA.status.mode).toBe('LIVE');
+    expect(stA.status.tradeDate).toBe('2026-11-25');
+    expect(stA.status.prevTradeDate).toBe('2026-11-24');
+    expect(stA.status.calendarDegraded).toBe(true);
+    dbA.close();
+
+    // 场景 B：工作日 09:20 无 Key 启动，公开分时和快照尚未出今日数据；09:25:30 出现今日快照后自动重探切入 LIVE
+    const dbB = new AppDatabase(':memory:');
+    let nowB = shanghaiToTimestampMs('2026-11-25', 9, 20, 0);
+    let snapTradeDate = '2026-11-24';
+    const primaryB = createFakeProvider('tencent', {
+      fetchIntradayMinutes: vi.fn(async (symbol) => [
+        makeIntradayDay({ symbol, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 2e9 }),
+        makeIntradayDay({ symbol, tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 2e9 }),
+      ]),
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: snapTradeDate, timestampMs: nowB, turnover: 5e9 }));
+        }
+        return m;
+      }),
+    });
+
+    const schedulerB = new PollingScheduler({
+      database: dbB,
+      primarySnapshotProvider: primaryB,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: primaryB,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowB,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const stPreOpen = await schedulerB.tickOnce();
+    expect(stPreOpen.status.mode).toBe('REPLAY');
+
+    // 5 分钟后 09:25:30 公开源吐出今日日期 → 自动识别今日开市切入 AUCTION_GAP / LIVE
+    nowB = shanghaiToTimestampMs('2026-11-25', 9, 25, 30);
+    snapTradeDate = '2026-11-25';
+    const stOpened = await schedulerB.tickOnce();
+    expect(stOpened.status.phase).toBe('AUCTION_GAP');
+    expect(stOpened.status.mode).toBe('LIVE');
+    expect(stOpened.status.tradeDate).toBe('2026-11-25');
+    dbB.close();
+  });
+
+  it('captures 15:00:03 closing auction snapshot into minuteIndex 239 when transitioning AFTERNOON_SESSION -> POST_MARKET', async () => {
+    const db = new AppDatabase(':memory:');
+    db.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    db.setSetting('calendar.lastSyncedDate', '2026-11-24');
+
+    for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000688.SH']) {
+      db.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 1e9 }).bars);
+      db.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-24', barCount: 239, baseTurnoverPerMin: 1e9 }).bars);
+      db.upsertAuctionSnapshot({ symbol: sym, tradeDate: '2026-11-24', openPrice: 3500, auctionTurnover: 1e9, capturedAt: 1 });
+    }
+
+    let nowMs = shanghaiToTimestampMs('2026-11-24', 14, 59, 57);
+    let snapTs = nowMs;
+    let snapTurnover = 240e9;
+
+    const primary = createFakeProvider('tencent', {
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-24', timestampMs: snapTs, turnover: snapTurnover }));
+        }
+        return m;
+      }),
+    });
+
+    const scheduler = new PollingScheduler({
+      database: db,
+      primarySnapshotProvider: primary,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: primary,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowMs,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    await scheduler.tickOnce(); // 14:59:57
+    // 15:00:05 切入 POST_MARKET，触发一次终态收盘快照补拉（上游时间戳 15:00:03，含收盘集合竞价 255e9）
+    nowMs = shanghaiToTimestampMs('2026-11-24', 15, 0, 5);
+    snapTs = shanghaiToTimestampMs('2026-11-24', 15, 0, 3);
+    snapTurnover = 255e9;
+    const postState = await scheduler.tickOnce();
+
+    expect(postState.status.phase).toBe('POST_MARKET');
+    expect(postState.status.mode).toBe('REPLAY');
+    const bar239 = db.getIntradayBars('000001.SH', '2026-11-24').find((b) => b.minuteIndex === 239);
+    expect(bar239?.cumTurnover).toBe(255e9);
+
+    // 盘后再次 tick 不再发快照请求
+    const callsAfterClose = vi.mocked(primary.fetchBatchSnapshots).mock.calls.length;
+    nowMs = shanghaiToTimestampMs('2026-11-24', 15, 10, 0);
+    await scheduler.tickOnce();
+    expect(primary.fetchBatchSnapshots).toHaveBeenCalledTimes(callsAfterClose);
+
+    db.close();
+  });
+
+  it('prevents 399006.SZ cross-source scope mismatch in both REPLAY and LIVE (blocks dirty DB writes and realigns when available)', async () => {
+    // 1. REPLAY 模式：昨日腾讯 + 今日东财 → 必须标 CROSS_SOURCE_SCOPE_MISMATCH 且 metrics=null
+    const dbReplay = new AppDatabase(':memory:');
+    dbReplay.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    dbReplay.setSetting('calendar.lastSyncedDate', '2026-11-24');
+    dbReplay.upsertIntradayBars(
+      makeIntradayDay({ symbol: '399006.SZ', tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 4488.64e8 / 241, auctionTurnover: 4488.64e8 / 241, source: 'tencent' }).bars
+    );
+    dbReplay.upsertIntradayBars(
+      makeIntradayDay({ symbol: '399006.SZ', tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 4539.45e8 / 241, auctionTurnover: 4539.45e8 / 241, source: 'eastmoney' }).bars
+    );
+
+    const replayScheduler = new PollingScheduler({
+      database: dbReplay,
+      primarySnapshotProvider: createFakeProvider('tencent'),
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: createFakeProvider('tencent'),
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => shanghaiToTimestampMs('2026-11-24', 15, 30, 0),
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const replayState = await replayScheduler.tickOnce();
+    const cybReplay = replayState.indices.find((i) => i.symbol === '399006.SZ')!;
+    expect(cybReplay.degraded).toBe(true);
+    expect(cybReplay.degradedReason).toBe('CROSS_SOURCE_SCOPE_MISMATCH');
+    expect(cybReplay.metrics).toBeNull();
+    dbReplay.close();
+
+    // 2. LIVE 模式：昨日基线为 tencent，快照切到 hithink 且东财分时重拉失败 → 绝不把 hithink 写入 intraday_bars
+    const dbLive = new AppDatabase(':memory:');
+    dbLive.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    dbLive.setSetting('calendar.lastSyncedDate', '2026-11-24');
+    for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000688.SH']) {
+      dbLive.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 1e9, source: 'tencent' }).bars);
+      dbLive.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-24', barCount: 30, baseTurnoverPerMin: 1e9, source: 'tencent' }).bars);
+      dbLive.upsertAuctionSnapshot({ symbol: sym, tradeDate: '2026-11-24', openPrice: 2200, auctionTurnover: 1e9, capturedAt: 1 });
+    }
+
+    let nowLive = shanghaiToTimestampMs('2026-11-24', 10, 0, 30);
+    const tencentFail = createFakeProvider('tencent', {
+      fetchBatchSnapshots: vi.fn(async () => {
+        throw new ProviderRequestError({ provider: 'tencent', message: '429', httpStatus: 429, rateLimited: true });
+      }),
+    });
+    const sinaFail = createFakeProvider('sina', {
+      fetchBatchSnapshots: vi.fn(async () => {
+        throw new ProviderRequestError({ provider: 'sina', message: '403', httpStatus: 403, rateLimited: true });
+      }),
+    });
+    const eastmoneyFail = createFakeProvider('eastmoney', {
+      fetchIntradayMinutes: vi.fn(async () => {
+        throw new ProviderRequestError({ provider: 'eastmoney', message: 'down', retryable: true });
+      }),
+    });
+    const hithinkOk = createFakeHithink({
+      configured: true,
+      snapshots: async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-24', timestampMs: nowLive, turnover: 35e9, source: 'hithink' }));
+        }
+        return m;
+      },
+    });
+
+    const liveScheduler = new PollingScheduler({
+      database: dbLive,
+      primarySnapshotProvider: tencentFail,
+      secondarySnapshotProvider: sinaFail,
+      hithinkProvider: hithinkOk,
+      primaryIntradayProvider: tencentFail,
+      secondaryIntradayProvider: eastmoneyFail,
+      nowFn: () => nowLive,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    await liveScheduler.tickOnce(); // 切到 hithink
+    const stHithink1 = await liveScheduler.tickOnce(); // 10:00:30 hithink 拉取成功
+    nowLive = shanghaiToTimestampMs('2026-11-24', 10, 1, 30);
+    const stHithink2 = await liveScheduler.tickOnce(); // 跨分钟至 10:01:30
+
+    const cybLive = stHithink2.indices.find((i) => i.symbol === '399006.SZ')!;
+    expect(stHithink1.status.activeSnapshotProvider).toBe('hithink');
+    expect(cybLive.degraded).toBe(true);
+    expect(cybLive.degradedReason).toBe('CROSS_SOURCE_SCOPE_MISMATCH');
+    expect(cybLive.metrics).toBeNull();
+    // 确认 399006.SZ 的 intraday_bars 中绝无 hithink 异源脏记录写入
+    const cybBarsInDb = dbLive.getIntradayBars('399006.SZ', '2026-11-24');
+    expect(cybBarsInDb.every((b) => b.source === 'tencent')).toBe(true);
+    dbLive.close();
+  });
+
+  it('marks stale on frozen upstream timestamps, marks degraded on missing prev baseline/head gap, and nulls cross-gap barTurnover', async () => {
+    const db = new AppDatabase(':memory:');
+    db.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    db.setSetting('calendar.lastSyncedDate', '2026-11-24');
+
+    const nowMs = shanghaiToTimestampMs('2026-11-24', 10, 30, 0);
+    const frozenTs = shanghaiToTimestampMs('2026-11-24', 10, 15, 0); // 15 分钟前
+
+    const primary = createFakeProvider('tencent', {
+      fetchIntradayMinutes: vi.fn(async (symbol) => [
+        // 缺失第 0 分钟与第 5 分钟，且完全缺失昨日基线
+        makeIntradayDay({
+          symbol,
+          tradeDate: '2026-11-24',
+          barCount: 60,
+          baseTurnoverPerMin: 2e9,
+          skipMinutes: new Set([0, 5]),
+        }),
+      ]),
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-24', timestampMs: frozenTs, turnover: 120e9 }));
+        }
+        return m;
+      }),
+    });
+
+    const scheduler = new PollingScheduler({
+      database: db,
+      primarySnapshotProvider: primary,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: primary,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowMs,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const st = await scheduler.tickOnce();
+    expect(st.status.stale).toBe(true);
+    expect(st.status.degraded).toBe(true);
+    expect(st.marketTotal.degraded).toBe(true);
+    expect(st.marketTotal.degradedReason).toBe('MISSING_PREV_BASELINE');
+    // 跨缺口第 6 分钟（前一根 5 缺失）单分钟增量必须为 null，避免虚增
+    const bar6 = st.marketTotal.todaySeries.find((b) => b.minuteIndex === 6);
+    expect(bar6?.barTurnover).toBeNull();
+
+    db.close();
+  });
+
+  it('auto-wakes next morning after POST_MARKET via start() timer with zero overnight snapshot requests', async () => {
+    vi.useFakeTimers();
+    const db = new AppDatabase(':memory:');
+    try {
+      const openDays = ['2026-11-23', '2026-11-24', '2026-11-25'];
+      db.upsertTradingDays(openDays.map((date) => ({ date, isOpen: true })));
+      db.setSetting('calendar.lastSyncedDate', '2026-11-24');
+
+      for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000688.SH']) {
+        db.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 1e9 }).bars);
+        db.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 1e9 }).bars);
+      }
+
+      let nowMs = shanghaiToTimestampMs('2026-11-24', 15, 30, 0);
+      const primary = createFakeProvider('tencent', {
+        fetchBatchSnapshots: vi.fn(async (symbols) => {
+          const m = new Map<string, QuoteSnapshot>();
+          for (const s of symbols) {
+            m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-25', timestampMs: nowMs, turnover: 5e9 }));
+          }
+          return m;
+        }),
+      });
+      const hithink = createFakeHithink({ configured: true, tradingDays: openDays });
+
+      const scheduler = new PollingScheduler({
+        database: db,
+        primarySnapshotProvider: primary,
+        secondarySnapshotProvider: createFakeProvider('sina'),
+        hithinkProvider: hithink,
+        primaryIntradayProvider: primary,
+        secondaryIntradayProvider: createFakeProvider('eastmoney'),
+        nowFn: () => nowMs,
+        sleepFn: async () => {},
+        backfillDelayMs: 0,
+      });
+
+      const postSt = await scheduler.start();
+      expect(postSt.status.phase).toBe('POST_MARKET');
+      expect(primary.fetchBatchSnapshots).not.toHaveBeenCalled();
+
+      // 盘后休眠 30 分钟期间零高频快照请求
+      nowMs += 30 * 60 * 1000;
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      expect(primary.fetchBatchSnapshots).not.toHaveBeenCalled();
+
+      // 推进时钟至次日 09:15:00：常驻定时器自动唤醒切入 OPEN_AUCTION / LIVE
+      nowMs = shanghaiToTimestampMs('2026-11-25', 9, 15, 0);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(scheduler.getLatestState()?.status.phase).toBe('OPEN_AUCTION');
+      expect(scheduler.getLatestState()?.status.mode).toBe('LIVE');
+      expect(primary.fetchBatchSnapshots).toHaveBeenCalled();
+
+      // stop() 后推进时间不再产生新的快照请求
+      const callsBeforeStop = vi.mocked(primary.fetchBatchSnapshots).mock.calls.length;
+      scheduler.stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(primary.fetchBatchSnapshots).toHaveBeenCalledTimes(callsBeforeStop);
+    } finally {
+      vi.useRealTimers();
+      db.close();
+    }
+  });
+
+  it('safely ignores in-flight results after stop()+db.close(), reloads recentAlerts from SQLite, probes sina recovery from hithink, and syncs slopeWindow', async () => {
+    // 1. 重启回填 SQLite 告警事件 + updateEnergyConfig 同步 slopeWindow + hithink 滞留探测新浪恢复
+    const db = new AppDatabase(':memory:');
+    db.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+    db.setSetting('calendar.lastSyncedDate', '2026-11-24');
+    db.insertAlertEvent({
+      symbol: '000001.SH',
+      name: '上证指数',
+      tradeDate: '2026-11-24',
+      minuteIndex: 20,
+      direction: 'SURGE',
+      slope: 2.1,
+      windowMultiple: 1.8,
+      cumRatio: 0.12,
+      message: '上证指数快速放量',
+      createdAt: shanghaiToTimestampMs('2026-11-24', 9, 50, 0),
+    });
+
+    for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000688.SH']) {
+      db.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-23', barCount: 240, baseTurnoverPerMin: 1e9, source: 'eastmoney' }).bars);
+      db.upsertIntradayBars(makeIntradayDay({ symbol: sym, tradeDate: '2026-11-24', barCount: 30, baseTurnoverPerMin: 1e9, source: 'eastmoney' }).bars);
+      db.upsertAuctionSnapshot({ symbol: sym, tradeDate: '2026-11-24', openPrice: 3500, auctionTurnover: 1e9, capturedAt: 1 });
+    }
+
+    let nowMs = shanghaiToTimestampMs('2026-11-24', 10, 0, 15);
+    let sinaHealthy = false;
+    const tencent = createFakeProvider('tencent', {
+      fetchBatchSnapshots: vi.fn(async () => {
+        throw new ProviderRequestError({ provider: 'tencent', message: '429', httpStatus: 429, rateLimited: true });
+      }),
+      healthCheck: vi.fn(async () => ({ provider: 'tencent' as const, ok: false, latencyMs: 10, error: 'down' })),
+    });
+    const sina = createFakeProvider('sina', {
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        if (!sinaHealthy) {
+          throw new ProviderRequestError({ provider: 'sina', message: '403', httpStatus: 403, rateLimited: true });
+        }
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-24', timestampMs: nowMs, turnover: 32e9, source: 'sina' }));
+        }
+        return m;
+      }),
+      healthCheck: vi.fn(async () => ({ provider: 'sina' as const, ok: sinaHealthy, latencyMs: 12, error: sinaHealthy ? null : 'down' })),
+    });
+    const hithink = createFakeHithink({
+      configured: true,
+      snapshots: async (symbols) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(s, makeSnapshot({ symbol: s, tradeDate: '2026-11-24', timestampMs: nowMs, turnover: 32e9, source: 'hithink' }));
+        }
+        return m;
+      },
+    });
+
+    const dbReadSpy = vi.spyOn(db, 'getIntradayBars');
+    const scheduler = new PollingScheduler({
+      database: db,
+      primarySnapshotProvider: tencent,
+      secondarySnapshotProvider: sina,
+      hithinkProvider: hithink,
+      primaryIntradayProvider: tencent,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowMs,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+    scheduler.updateEnergyConfig({ slopeWindow: 10 });
+
+    const s1 = await scheduler.tickOnce();
+    expect(s1.recentAlerts).toHaveLength(1);
+    expect(s1.recentAlerts[0].symbol).toBe('000001.SH');
+    expect(s1.status.activeSnapshotProvider).toBe('hithink');
+    expect(s1.marketTotal.metrics?.slopeWindow).toBe(10);
+
+    // 连续第二次 tick 不再重复同步扫描 SQLite intraday_bars
+    const dbReadsAfterFirst = dbReadSpy.mock.calls.length;
+    nowMs += 15_000;
+    await scheduler.tickOnce();
+    expect(dbReadSpy).toHaveBeenCalledTimes(dbReadsAfterFirst);
+
+    // 5 分钟后腾讯仍故障但新浪恢复 → 自动从 hithink 兜底切回 sina
+    sinaHealthy = true;
+    nowMs += 5 * 60 * 1000 + 1000;
+    const sRecovered = await scheduler.tickOnce();
+    expect(sina.healthCheck).toHaveBeenCalledTimes(1);
+    expect(sRecovered.status.activeSnapshotProvider).toBe('sina');
+    db.close();
+
+    // 2. stop() + db.close() 在异步请求未完成时触发：后续 resolve 不抛 database is not open 异常
+    const dbRace = new AppDatabase(':memory:');
+    dbRace.upsertTradingDays([{ date: '2026-11-24', isOpen: true }]);
+    dbRace.setSetting('calendar.lastSyncedDate', '2026-11-24');
+
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      markFetchStarted = resolve;
+    });
+    const slowFetchGate: { resolve: ((v: Map<string, QuoteSnapshot>) => void) | null } = {
+      resolve: null,
+    };
+    const slowPrimary = createFakeProvider('tencent', {
+      fetchIntradayMinutes: vi.fn(async () => []),
+      fetchBatchSnapshots: vi.fn(
+        () =>
+          new Promise<Map<string, QuoteSnapshot>>((resolve) => {
+            slowFetchGate.resolve = resolve;
+            markFetchStarted();
+          })
+      ),
+    });
+    const raceScheduler = new PollingScheduler({
+      database: dbRace,
+      primarySnapshotProvider: slowPrimary,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: slowPrimary,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => shanghaiToTimestampMs('2026-11-24', 10, 0, 15),
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const inFlight = raceScheduler.tickOnce();
+    await fetchStarted;
+    raceScheduler.stop();
+    dbRace.close();
+
+    slowFetchGate.resolve?.(
+      new Map([
+        [
+          '000001.SH',
+          makeSnapshot({
+            symbol: '000001.SH',
+            tradeDate: '2026-11-24',
+            timestampMs: shanghaiToTimestampMs('2026-11-24', 10, 0, 15),
+            turnover: 50e9,
+          }),
+        ],
+      ])
+    );
+    await expect(inFlight).resolves.toBeDefined();
+  });
 });

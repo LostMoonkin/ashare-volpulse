@@ -78,6 +78,23 @@ export function decodeGb18030(buf: Buffer): string {
   return new TextDecoder('gb18030').decode(buf);
 }
 
+/**
+ * 严格解析有限数值，拒绝空字符串、纯空白、null、undefined 与非数字，
+ * 防止 JS `Number('') === 0` / `Number(null) === 0` 将缺失成交额或价格静默补零。
+ */
+export function parseStrictFiniteNumber(raw: unknown): number {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) ? raw : Number.NaN;
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return Number.NaN;
+    const num = Number(trimmed);
+    return Number.isFinite(num) ? num : Number.NaN;
+  }
+  return Number.NaN;
+}
+
 /** 000001.SH -> sh000001; 399106.SZ -> sz399106 */
 export function toTxSinaCode(thscode: string): string {
   const match = thscode.trim().toUpperCase().match(/^(\d{6})\.(SH|SZ)$/);

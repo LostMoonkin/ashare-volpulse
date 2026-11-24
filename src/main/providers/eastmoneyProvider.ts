@@ -14,6 +14,7 @@ import {
   chunkSymbols,
   fetchBufferWithTimeout,
   normalizeDateStr,
+  parseStrictFiniteNumber,
   toEastmoneySecid,
 } from './http';
 import { ProviderRequestError, type FetchLike, type MarketDataProvider } from './types';
@@ -64,13 +65,15 @@ export function parseEastmoneyIntradayResponse(
   }
 
   const upperSymbol = symbol.toUpperCase();
-  const prevCloseNum = Number(data?.preClose ?? data?.prePrice);
-  const prevClose = Number.isFinite(prevCloseNum) && prevCloseNum > 0 ? prevCloseNum : null;
+  const prevCloseNum = parseStrictFiniteNumber(data?.preClose ?? data?.prePrice);
+  const latestDayPrevClose =
+    Number.isFinite(prevCloseNum) && prevCloseNum > 0 ? prevCloseNum : null;
 
   const result: IntradayDayData[] = [];
   const sortedDates = [...byDate.keys()].sort((a, b) => a.localeCompare(b));
 
-  for (const tradeDate of sortedDates) {
+  for (let dateIdx = 0; dateIdx < sortedDates.length; dateIdx++) {
+    const tradeDate = sortedDates[dateIdx];
     const rows = byDate.get(tradeDate) ?? [];
     let auction: { openPrice: number; auctionTurnover: number } | null = null;
     let runningCumVolume = 0;
@@ -84,9 +87,9 @@ export function parseEastmoneyIntradayResponse(
       const [, timeStr] = (parts[0] ?? '').trim().split(/\s+/);
       if (!timeStr) continue;
 
-      const price = Number(parts[2]); // f53 收盘/当前价
-      const barVolHands = Number(parts[5]); // f56 单分钟成交量（手）
-      const barTurnover = Number(parts[6]); // f57 单分钟成交额（元）
+      const price = parseStrictFiniteNumber(parts[2]); // f53 收盘/当前价
+      const barVolHands = parseStrictFiniteNumber(parts[5]); // f56 单分钟成交量（手）
+      const barTurnover = parseStrictFiniteNumber(parts[6]); // f57 单分钟成交额（元）
 
       if (
         !Number.isFinite(price) ||
@@ -129,6 +132,8 @@ export function parseEastmoneyIntradayResponse(
     }
 
     bars.sort((a, b) => a.minuteIndex - b.minuteIndex);
+    // 东财 trends2 顶层 data.preClose 仅代表最新交易日的昨收，不可广播赋给更早的历史日期
+    const prevClose = dateIdx === sortedDates.length - 1 ? latestDayPrevClose : null;
     result.push({
       symbol: upperSymbol,
       tradeDate,
@@ -175,9 +180,9 @@ export function parseEastmoneySnapshotResponse(payload: unknown): Map<string, Qu
     const exchange = d.f13 === 1 ? 'SH' : d.f13 === 0 ? 'SZ' : null;
     if (!exchange || !d.f12) continue;
     const symbol = `${d.f12}.${exchange}`;
-    const price = Number(d.f2);
-    const turnover = Number(d.f6);
-    const timestampSec = Number(d.f124);
+    const price = parseStrictFiniteNumber(d.f2);
+    const turnover = parseStrictFiniteNumber(d.f6);
+    const timestampSec = parseStrictFiniteNumber(d.f124);
     if (
       !Number.isFinite(price) ||
       !Number.isFinite(turnover) ||
@@ -190,18 +195,24 @@ export function parseEastmoneySnapshotResponse(payload: unknown): Map<string, Qu
 
     const timestampMs = timestampSec * 1000;
     const { dateStr: tradeDate } = getShanghaiParts(timestampMs);
-    const volHands = Number(d.f5);
+    const volHands = parseStrictFiniteNumber(d.f5);
+    const prevCloseVal = parseStrictFiniteNumber(d.f18);
+    const openVal = parseStrictFiniteNumber(d.f17);
+    const highVal = parseStrictFiniteNumber(d.f15);
+    const lowVal = parseStrictFiniteNumber(d.f16);
+    const changeAmtVal = parseStrictFiniteNumber(d.f4);
+    const changePctVal = parseStrictFiniteNumber(d.f3);
 
     result.set(symbol, {
       symbol,
       name: d.f14?.trim() || symbol,
       price,
-      prevClose: Number.isFinite(Number(d.f18)) ? Number(d.f18) : 0,
-      open: Number.isFinite(Number(d.f17)) ? Number(d.f17) : price,
-      high: Number.isFinite(Number(d.f15)) ? Number(d.f15) : price,
-      low: Number.isFinite(Number(d.f16)) ? Number(d.f16) : price,
-      changeAmt: Number.isFinite(Number(d.f4)) ? Number(d.f4) : 0,
-      changePct: Number.isFinite(Number(d.f3)) ? Number(d.f3) : 0,
+      prevClose: Number.isFinite(prevCloseVal) ? prevCloseVal : 0,
+      open: Number.isFinite(openVal) ? openVal : price,
+      high: Number.isFinite(highVal) ? highVal : price,
+      low: Number.isFinite(lowVal) ? lowVal : price,
+      changeAmt: Number.isFinite(changeAmtVal) ? changeAmtVal : 0,
+      changePct: Number.isFinite(changePctVal) ? changePctVal : 0,
       volumeShares: Number.isFinite(volHands) && volHands >= 0 ? volHands * 100 : 0,
       turnover,
       tradeDate,

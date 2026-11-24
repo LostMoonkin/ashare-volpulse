@@ -108,7 +108,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.MARKET_REFRESH_NOW, async () => {
     if (!scheduler) return null;
-    return scheduler.tickOnce();
+    return scheduler.refreshNow();
   });
 
   ipcMain.handle(
@@ -141,7 +141,6 @@ function initServices(): void {
 
   scheduler = new PollingScheduler({
     database,
-    secretStore,
     primarySnapshotProvider: tencentProvider,
     secondarySnapshotProvider: sinaProvider,
     hithinkProvider,
@@ -156,7 +155,12 @@ app.whenReady().then(() => {
   initServices();
   registerIpcHandlers();
   mainWindow = createMainWindow();
-  void scheduler?.start();
+  void scheduler?.start().catch((err: unknown) => {
+    console.error(
+      '[main] PollingScheduler start failed:',
+      err instanceof Error ? err.message : String(err)
+    );
+  });
 
   app.on('activate', () => {
     if (!mainWindow && BrowserWindow.getAllWindows().length === 0) {

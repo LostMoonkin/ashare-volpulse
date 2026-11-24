@@ -12,6 +12,7 @@ import {
   fetchBufferWithTimeout,
   normalizeDateStr,
   parseCompactShanghaiTimestamp,
+  parseStrictFiniteNumber,
   toTxSinaCode,
 } from './http';
 import { ProviderRequestError, type FetchLike, type MarketDataProvider } from './types';
@@ -51,18 +52,19 @@ export function parseTencentSnapshotResponse(text: string): Map<string, QuoteSna
     if (parts.length < 38) continue;
 
     const name = parts[1]?.trim() || symbol;
-    const price = Number(parts[3]);
-    const prevClose = Number(parts[4]);
-    const open = Number(parts[5]);
-    const volumeHands = Number(parts[6]);
-    const changeAmt = Number(parts[31]);
-    const changePct = Number(parts[32]);
-    const high = Number(parts[33]);
-    const low = Number(parts[34]);
+    const price = parseStrictFiniteNumber(parts[3]);
+    const prevClose = parseStrictFiniteNumber(parts[4]);
+    const open = parseStrictFiniteNumber(parts[5]);
+    const volumeHands = parseStrictFiniteNumber(parts[6]);
+    const changeAmt = parseStrictFiniteNumber(parts[31]);
+    const changePct = parseStrictFiniteNumber(parts[32]);
+    const high = parseStrictFiniteNumber(parts[33]);
+    const low = parseStrictFiniteNumber(parts[34]);
 
     const f35Parts = (parts[35] ?? '').split('/');
-    const f35Yuan = f35Parts.length >= 3 && f35Parts[2] !== '' ? Number(f35Parts[2]) : Number.NaN;
-    const f37Wan = Number(parts[37]);
+    const f35Yuan =
+      f35Parts.length >= 3 ? parseStrictFiniteNumber(f35Parts[2]) : Number.NaN;
+    const f37Wan = parseStrictFiniteNumber(parts[37]);
     const turnover = Number.isFinite(f35Yuan)
       ? f35Yuan
       : Number.isFinite(f37Wan)
@@ -138,20 +140,25 @@ export function parseTencentIntradayResponse(
     const tradeDate = normalizeDateStr(String(dayEntry.date ?? ''));
     if (!tradeDate || !Array.isArray(dayEntry.data)) continue;
 
-    const prevCloseNum = Number(dayEntry.prec);
+    const prevCloseNum = parseStrictFiniteNumber(dayEntry.prec);
     const prevClose = Number.isFinite(prevCloseNum) && prevCloseNum > 0 ? prevCloseNum : null;
 
     let auction: { openPrice: number; auctionTurnover: number } | null = null;
-    const bars: IntradayBarRow[] = [];
+    const rawEntries: Array<{
+      minuteIndex: number;
+      price: number;
+      cumVolHands: number;
+      cumTurnover: number;
+    }> = [];
     const seenIndices = new Set<number>();
 
     for (const row of dayEntry.data) {
       const cols = String(row).trim().split(/\s+/);
       if (cols.length < 4) continue;
       const hhmm = cols[0];
-      const price = Number(cols[1]);
-      const cumVolHands = Number(cols[2]);
-      const cumTurnover = Number(cols[3]);
+      const price = parseStrictFiniteNumber(cols[1]);
+      const cumVolHands = parseStrictFiniteNumber(cols[2]);
+      const cumTurnover = parseStrictFiniteNumber(cols[3]);
 
       if (
         !Number.isFinite(price) ||
@@ -175,31 +182,37 @@ export function parseTencentIntradayResponse(
         continue;
       }
       seenIndices.add(minuteIndex);
+      rawEntries.push({ minuteIndex, price, cumVolHands, cumTurnover });
+    }
 
+    // 先按 minuteIndex 升序排列后再差分计算单分钟增量，防止上游乱序导致 barTurnover 错算
+    rawEntries.sort((a, b) => a.minuteIndex - b.minuteIndex);
+
+    const bars: IntradayBarRow[] = [];
+    for (const entry of rawEntries) {
       const prevBar = bars.length > 0 ? bars[bars.length - 1] : null;
       let barTurnover: number;
       if (prevBar) {
-        barTurnover = Math.max(0, cumTurnover - prevBar.cumTurnover);
-      } else if (minuteIndex === 0 && auction) {
-        barTurnover = Math.max(0, cumTurnover - auction.auctionTurnover);
+        barTurnover = Math.max(0, entry.cumTurnover - prevBar.cumTurnover);
+      } else if (entry.minuteIndex === 0 && auction) {
+        barTurnover = Math.max(0, entry.cumTurnover - auction.auctionTurnover);
       } else {
-        barTurnover = cumTurnover;
+        barTurnover = entry.cumTurnover;
       }
 
       bars.push({
         symbol: symbol.toUpperCase(),
         tradeDate,
-        minuteIndex,
-        minuteStr: minuteIndexToLabel(minuteIndex),
-        price,
-        cumVolume: Math.max(0, cumVolHands) * 100,
-        cumTurnover,
+        minuteIndex: entry.minuteIndex,
+        minuteStr: minuteIndexToLabel(entry.minuteIndex),
+        price: entry.price,
+        cumVolume: Math.max(0, entry.cumVolHands) * 100,
+        cumTurnover: entry.cumTurnover,
         barTurnover,
         source: 'tencent',
       });
     }
 
-    bars.sort((a, b) => a.minuteIndex - b.minuteIndex);
     normalizedDays.push({
       symbol: symbol.toUpperCase(),
       tradeDate,

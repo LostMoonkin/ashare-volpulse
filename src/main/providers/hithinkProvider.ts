@@ -9,10 +9,12 @@ import type {
 } from '../../shared/types';
 import type { SecretStore } from '../storage/secretStore';
 import {
+  chunkSymbols,
   defaultSleep,
   fetchBufferWithTimeout,
   isIndexThscode,
   normalizeDateStr,
+  parseStrictFiniteNumber,
 } from './http';
 import {
   ProviderRequestError,
@@ -168,26 +170,29 @@ export function parseHithinkSnapshotData(
     const symbol = String(item.thscode ?? '').trim().toUpperCase();
     if (!/^\d{6}\.(SH|SZ)$/.test(symbol)) continue;
 
-    const price = Number(item.last_price);
-    const turnover = Number(item.turnover);
+    const price = parseStrictFiniteNumber(item.last_price);
+    const turnover = parseStrictFiniteNumber(item.turnover);
     if (!Number.isFinite(price) || !Number.isFinite(turnover) || turnover < 0) continue;
 
-    const changePct = Number(item.price_change_ratio_pct);
-    const prevCloseRaw = Number(item.prev_close);
+    const changePct = parseStrictFiniteNumber(item.price_change_ratio_pct);
+    const prevCloseRaw = parseStrictFiniteNumber(item.prev_close);
     const prevClose =
       Number.isFinite(prevCloseRaw) && prevCloseRaw > 0
         ? prevCloseRaw
         : Number.isFinite(changePct) && changePct !== -100
           ? price / (1 + changePct / 100)
           : 0;
-    const changeAmtRaw = Number(item.price_change);
+    const changeAmtRaw = parseStrictFiniteNumber(item.price_change);
     const changeAmt = Number.isFinite(changeAmtRaw)
       ? changeAmtRaw
       : prevClose > 0
         ? Math.round((price - prevClose) * 10_000) / 10_000
         : 0;
 
-    const volumeShares = Number(item.volume);
+    const volumeShares = parseStrictFiniteNumber(item.volume);
+    const openVal = parseStrictFiniteNumber(item.open);
+    const highVal = parseStrictFiniteNumber(item.high);
+    const lowVal = parseStrictFiniteNumber(item.low);
     const timestampMs = parseHithinkTimestampMs(item.timestamp, batchTs);
     const { dateStr: tradeDate } = getShanghaiParts(timestampMs);
 
@@ -196,9 +201,9 @@ export function parseHithinkSnapshotData(
       name: nameLookup?.get(symbol) ?? MONITORED_INDEX_NAMES[symbol] ?? symbol,
       price,
       prevClose,
-      open: Number.isFinite(Number(item.open)) ? Number(item.open) : price,
-      high: Number.isFinite(Number(item.high)) ? Number(item.high) : price,
-      low: Number.isFinite(Number(item.low)) ? Number(item.low) : price,
+      open: Number.isFinite(openVal) ? openVal : price,
+      high: Number.isFinite(highVal) ? highVal : price,
+      low: Number.isFinite(lowVal) ? lowVal : price,
       changeAmt,
       changePct: Number.isFinite(changePct) ? changePct : 0,
       volumeShares: Number.isFinite(volumeShares) && volumeShares >= 0 ? volumeShares : 0,
@@ -346,18 +351,20 @@ export class HithinkProvider implements MarketDataProvider {
     const merged = new Map<string, QuoteSnapshot>();
     const fallbackNow = this.nowFn();
 
-    if (indexSymbols.length > 0) {
+    const indexChunks = chunkSymbols(indexSymbols);
+    for (const chunk of indexChunks) {
       const data = await this.requestJson<HithinkSnapshotData>(
-        `/api/a-share-index/prices/snapshot?thscodes=${encodeURIComponent(indexSymbols.join(','))}`
+        `/api/a-share-index/prices/snapshot?thscodes=${encodeURIComponent(chunk.join(','))}`
       );
       for (const [sym, snap] of parseHithinkSnapshotData(data, fallbackNow, nameLookup)) {
         merged.set(sym, snap);
       }
     }
 
-    if (stockSymbols.length > 0) {
+    const stockChunks = chunkSymbols(stockSymbols);
+    for (const chunk of stockChunks) {
       const data = await this.requestJson<HithinkSnapshotData>(
-        `/api/a-share/prices/snapshot?thscodes=${encodeURIComponent(stockSymbols.join(','))}`
+        `/api/a-share/prices/snapshot?thscodes=${encodeURIComponent(chunk.join(','))}`
       );
       for (const [sym, snap] of parseHithinkSnapshotData(data, fallbackNow, nameLookup)) {
         merged.set(sym, snap);
