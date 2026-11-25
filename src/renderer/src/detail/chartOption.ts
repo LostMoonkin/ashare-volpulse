@@ -209,8 +209,9 @@ export function buildEnergyChartOption(dataset: EnergyChartDataset): EChartsCore
         const markersHere = dataset.alertMarkers.filter((m) => m.slotIndex === slotIndex);
         for (const m of markersHere) {
           const mc = m.direction === 'SURGE' ? '#ff7b72' : '#56d364';
+          const tag = m.isReplay ? '[回放] ' : m.isSimulated ? '[模拟测试] ' : '';
           lines.push(
-            `<div style="color:${mc};margin-top:3px;">● ${m.isSimulated ? '[模拟测试] ' : ''}${m.direction === 'SURGE' ? '快速放量' : '快速缩量'} (${m.windowMultiple.toFixed(2)}x)</div>`
+            `<div style="color:${mc};margin-top:3px;">● ${tag}${m.direction === 'SURGE' ? '快速放量' : '快速缩量'} (${m.windowMultiple.toFixed(2)}x)</div>`
           );
         }
         return lines.join('');

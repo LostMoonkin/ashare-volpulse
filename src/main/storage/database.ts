@@ -240,6 +240,22 @@ export class AppDatabase {
     }));
   }
 
+  /** 查询本地已录制分钟线涵盖的交易日列表（降序，用于全天回放选择） */
+  getRecordedBarDates(): string[] {
+    const rows = this.db
+      .prepare('SELECT DISTINCT trade_date FROM intraday_bars ORDER BY trade_date DESC')
+      .all() as Array<{ trade_date: string }>;
+    return rows.map((r) => r.trade_date);
+  }
+
+  /** 查询指定交易日在本地已录制分钟线中的所有标的 */
+  getRecordedSymbolsForDate(tradeDate: string): string[] {
+    const rows = this.db
+      .prepare('SELECT DISTINCT symbol FROM intraday_bars WHERE trade_date = ? ORDER BY symbol ASC')
+      .all(tradeDate) as Array<{ symbol: string }>;
+    return rows.map((r) => r.symbol);
+  }
+
   // ---------------------------------------------------------------------------
   // 3. auction_snapshots
   // ---------------------------------------------------------------------------

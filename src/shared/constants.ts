@@ -121,3 +121,9 @@ export const DETAIL_MIN_HEIGHT = 520;
 
 /** 开发态模拟测试告警的统一标记前缀（严禁伪装成实盘告警） */
 export const SIMULATED_ALERT_PREFIX = '[模拟测试]';
+
+/** 全天历史回放告警的统一标记前缀（不入实盘库、不弹系统通知） */
+export const REPLAY_ALERT_PREFIX = '[回放]';
+
+/** 全天回放默认每帧间隔（毫秒），约 29 秒跑完 09:25 → 15:00 全天 */
+export const DEFAULT_REPLAY_STEP_MS = 120;

@@ -230,6 +230,7 @@ export function DetailView() {
       ? market?.marketTotal.auctionTurnover ?? null
       : selectedSnapshot?.auctionTurnover ?? null;
 
+  const replay = market?.status.replay?.active ? market.status.replay : null;
   const isReplayMode = market?.status.mode === 'REPLAY';
   const targetDegraded =
     selectedSymbol === MARKET_TOTAL_SYMBOL
@@ -248,8 +249,17 @@ export function DetailView() {
         <header className="detail-header drag-region">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <strong style={{ fontSize: '14px' }}>A 股实时能量看板</strong>
-            <span className="badge badge-muted">{formatPhaseLabel(market?.status.phase)}</span>
-            {isReplayMode && <span className="badge badge-flat">复盘</span>}
+            {replay ? (
+              <span className="badge badge-warn">
+                回放 {replay.tradeDate} · {replay.currentTimeLabel} ({replay.stepIndex}/
+                {replay.totalSteps - 1})
+              </span>
+            ) : (
+              <>
+                <span className="badge badge-muted">{formatPhaseLabel(market?.status.phase)}</span>
+                {isReplayMode && <span className="badge badge-flat">复盘</span>}
+              </>
+            )}
             {market?.status.degraded && <span className="badge badge-warn">数据源降级</span>}
           </div>
 
@@ -363,7 +373,7 @@ export function DetailView() {
                       className="btn btn-sm"
                       onClick={() => void window.api.refreshMarketNow()}
                     >
-                      立即刷新
+                      {replay ? '重新回放' : '立即刷新'}
                     </button>
                   </div>
                 </div>
@@ -456,6 +466,8 @@ export function DetailView() {
               scope={alertScope}
               tradeDate={activeTradeDate}
               isDev={Boolean(shell?.isDev)}
+              isDayReplay={Boolean(replay)}
+              replayTradeDate={replay?.tradeDate ?? null}
               onScopeChange={setAlertScope}
               onRefresh={() => loadAlerts()}
               onSimulate={handleSimulate}

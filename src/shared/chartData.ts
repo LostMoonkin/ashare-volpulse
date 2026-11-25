@@ -1,6 +1,10 @@
 import { evaluateEnergySeries, type MinuteTurnoverPoint } from '../core/energyEngine';
 import { minuteIndexToLabel } from '../core/tradingClock';
-import { MARKET_TOTAL_SYMBOL, SIMULATED_ALERT_PREFIX } from './constants';
+import {
+  MARKET_TOTAL_SYMBOL,
+  REPLAY_ALERT_PREFIX,
+  SIMULATED_ALERT_PREFIX,
+} from './constants';
 import type {
   AlertDirection,
   AlertEventRow,
@@ -24,6 +28,7 @@ export interface ChartAlertMarker {
   cumRatio: number;
   message: string;
   isSimulated: boolean;
+  isReplay: boolean;
 }
 
 export interface EnergyChartDataset {
@@ -392,6 +397,7 @@ export function buildEnergyChartDataset(params: {
       cumRatio: ev.cumRatio,
       message: ev.message,
       isSimulated: ev.message.startsWith(SIMULATED_ALERT_PREFIX),
+      isReplay: ev.message.startsWith(REPLAY_ALERT_PREFIX),
     });
   }
 

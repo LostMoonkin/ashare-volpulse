@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { SIMULATED_ALERT_PREFIX } from '../../../shared/constants';
+import { REPLAY_ALERT_PREFIX, SIMULATED_ALERT_PREFIX } from '../../../shared/constants';
 import type { AlertDirection, AlertEventRow } from '../../../shared/types';
 import { formatClockTime, formatSignedPct } from '../utils/format';
 
@@ -10,6 +10,8 @@ export interface AlertsPanelProps {
   scope: AlertHistoryScope;
   tradeDate?: string | null;
   isDev: boolean;
+  isDayReplay?: boolean;
+  replayTradeDate?: string | null;
   onScopeChange: (scope: AlertHistoryScope) => void;
   onRefresh: () => void;
   onSimulate: (direction: AlertDirection) => Promise<void>;
@@ -21,6 +23,8 @@ export function AlertsPanel({
   scope,
   tradeDate,
   isDev,
+  isDayReplay = false,
+  replayTradeDate = null,
   onScopeChange,
   onRefresh,
   onSimulate,
@@ -79,7 +83,7 @@ export function AlertsPanel({
               急缩
             </button>
           </div>
-          {isDev && (
+          {isDev && !isDayReplay && (
             <>
               <button
                 type="button"
@@ -103,6 +107,16 @@ export function AlertsPanel({
         </div>
       </h2>
 
+      {isDayReplay && (
+        <div
+          className="hud-conflict-banner"
+          style={{ marginBottom: '10px', cursor: 'default' }}
+        >
+          回放模式（{replayTradeDate ?? ''}）：以下为本次回放实时触发的演练告警，仅内存展示，不写入实盘
+          alert_events，不弹出 Windows 系统通知。
+        </div>
+      )}
+
       {filtered.length === 0 ? (
         <div style={{ color: 'var(--text-secondary)', fontSize: '12px', padding: '16px 0' }}>
           暂无符合条件的异动告警记录。盘中触发快速放量或快速缩量时将自动记录并推送。
@@ -110,6 +124,7 @@ export function AlertsPanel({
       ) : (
         <div className="alert-list">
           {filtered.map((item) => {
+            const isReplay = item.message.startsWith(REPLAY_ALERT_PREFIX);
             const isSim = item.message.startsWith(SIMULATED_ALERT_PREFIX);
             const isSurge = item.direction === 'SURGE';
             return (
@@ -124,6 +139,7 @@ export function AlertsPanel({
                     <span className={`badge ${isSurge ? 'badge-up' : 'badge-down'}`}>
                       {isSurge ? '快速放量' : '快速缩量'}
                     </span>
+                    {isReplay && <span className="badge badge-flat">回放</span>}
                     {isSim && <span className="badge badge-warn">模拟测试</span>}
                     <strong>
                       {item.name} ({item.symbol})

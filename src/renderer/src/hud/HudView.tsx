@@ -79,6 +79,7 @@ export function HudView() {
 
   const total = market?.marketTotal ?? null;
   const status = market?.status ?? null;
+  const replay = status?.replay?.active ? status.replay : null;
   const isDegraded = Boolean(status?.degraded || status?.stale || total?.degraded);
   const volBadge = formatVolumeState(total?.metrics?.volumeState);
   const slopeTrend = formatSlopeTrend(
@@ -117,8 +118,16 @@ export function HudView() {
           <div className="hud-brand">
             <span className={`status-dot ${statusDotClass}`} />
             <span>A 股能量看板</span>
-            <span className="badge badge-muted">{formatPhaseLabel(status?.phase)}</span>
-            {status?.mode === 'REPLAY' && <span className="badge badge-flat">复盘</span>}
+            {replay ? (
+              <span className="badge badge-warn">
+                回放 {replay.tradeDate} {replay.currentTimeLabel}
+              </span>
+            ) : (
+              <>
+                <span className="badge badge-muted">{formatPhaseLabel(status?.phase)}</span>
+                {status?.mode === 'REPLAY' && <span className="badge badge-flat">复盘</span>}
+              </>
+            )}
           </div>
 
           <div className="hud-actions no-drag">
@@ -317,7 +326,7 @@ export function HudView() {
             title="点击查看异动事件流"
           >
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {activeAlert.isSimulated ? '[模拟测试] ' : ''}
+              {activeAlert.isReplay ? '[回放] ' : activeAlert.isSimulated ? '[模拟测试] ' : ''}
               {activeAlert.name} · {activeAlert.direction === 'SURGE' ? '急放' : '急缩'} (
               {formatSignedPct(activeAlert.slope, 2)}/分 · {activeAlert.windowMultiple.toFixed(2)}x)
             </span>
@@ -329,13 +338,22 @@ export function HudView() {
         <footer className="hud-footer no-drag">
           <div className="hud-footer-row">
             <span className="hud-status-text">
-              源：{status?.activeSnapshotProvider ?? status?.activeIntradayProvider ?? '—'}
-              {status?.lastLatencyMs !== null && status?.lastLatencyMs !== undefined
-                ? ` (${Math.round(status.lastLatencyMs)}ms)`
-                : ''}
-              {' · '}
-              {formatClockTime(status?.lastUpdatedAt)}
-              {isDegraded ? ' · 降级' : ''}
+              {replay ? (
+                <>
+                  回放模式（无实时轮询）· {replay.stepIndex}/{replay.totalSteps - 1}
+                  {replay.finished ? ' · 已播完' : ''}
+                </>
+              ) : (
+                <>
+                  源：{status?.activeSnapshotProvider ?? status?.activeIntradayProvider ?? '—'}
+                  {status?.lastLatencyMs !== null && status?.lastLatencyMs !== undefined
+                    ? ` (${Math.round(status.lastLatencyMs)}ms)`
+                    : ''}
+                  {' · '}
+                  {formatClockTime(status?.lastUpdatedAt)}
+                  {isDegraded ? ' · 降级' : ''}
+                </>
+              )}
             </span>
             <label className="opacity-control" title={`透明度 ${opacityPct}%`}>
               <span>透 {opacityPct}%</span>

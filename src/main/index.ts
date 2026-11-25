@@ -29,6 +29,7 @@ import {
   SinaProvider,
   TencentProvider,
 } from './providers';
+import { DayReplayEngine, parseReplayArgs, type ReplayCliOptions } from './replay';
 import { PollingScheduler } from './scheduler';
 import { AppDatabase } from './storage/database';
 import { MonitorSettingsStore } from './storage/monitorSettingsStore';
@@ -63,6 +64,16 @@ let trayManager: TrayManager | null = null;
 let bossKeyManager: BossKeyManager | null = null;
 let alertDispatcher: AlertDispatcher | null = null;
 let scheduler: PollingScheduler | null = null;
+let replayEngine: DayReplayEngine | null = null;
+let replayCliOptions: ReplayCliOptions | null = null;
+
+if (isDevMode) {
+  try {
+    replayCliOptions = parseReplayArgs(process.argv);
+  } catch (err: unknown) {
+    console.error('[main] Invalid --replay argument:', err instanceof Error ? err.message : String(err));
+  }
+}
 
 function buildShellState(): DesktopShellState {
   if (!shellSettings || !windowManager || !bossKeyManager) {
@@ -124,6 +135,23 @@ function applyAutoLaunchSetting(enabled: boolean): boolean {
 }
 
 function applyMonitorConfigToScheduler(config: MonitorConfig): void {
+  if (replayEngine) {
+    replayEngine.updateEnergyConfig({
+      expandThresholdPct: config.expandThresholdPct,
+      shrinkThresholdPct: config.shrinkThresholdPct,
+      slopeWindow: config.slopeWindow,
+    });
+    replayEngine.updateAlertConfig({
+      enabled: config.alertsEnabled,
+      surgeSlopeThreshold: config.surgeSlopeThreshold,
+      surgeMultipleThreshold: config.surgeMultipleThreshold,
+      shrinkSlopeThreshold: config.shrinkSlopeThreshold,
+      shrinkMultipleThreshold: config.shrinkMultipleThreshold,
+      matchMode: config.matchMode,
+      cooldownMinutes: config.cooldownMinutes,
+      slopeWindow: config.slopeWindow,
+    });
+  }
   if (!scheduler) return;
   scheduler.updatePollingInterval(config.pollingIntervalSec);
   scheduler.updateEnergyConfig({
@@ -262,10 +290,16 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.MARKET_GET_STATE, () => {
+    if (replayEngine) return replayEngine.getLatestState();
     return scheduler?.getLatestState() ?? null;
   });
 
   ipcMain.handle(IPC_CHANNELS.MARKET_REFRESH_NOW, async () => {
+    // 回放模式下禁止发起实时轮询，改为从头重播当前回放交易日
+    if (replayEngine) {
+      replayEngine.start();
+      return replayEngine.getLatestState();
+    }
     if (!scheduler) return null;
     return scheduler.refreshNow();
   });
@@ -405,6 +439,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.ALERT_GET_RECENT,
     (_event, tradeDate?: string, limit?: number) => {
+      if (replayEngine) {
+        return replayEngine.getReplayAlerts();
+      }
       if (!database) return [];
       const safeLimit =
         typeof limit === 'number' && Number.isFinite(limit)
@@ -478,7 +515,7 @@ function initServices(): void {
       if (shellSettings && windowManager && bossKeyManager) {
         win.webContents.send(IPC_CHANNELS.SHELL_STATE_UPDATED, buildShellState());
       }
-      const latestMarket = scheduler?.getLatestState();
+      const latestMarket = replayEngine?.getLatestState() ?? scheduler?.getLatestState();
       if (latestMarket) {
         win.webContents.send(IPC_CHANNELS.MARKET_STATE_UPDATED, latestMarket);
       }
@@ -519,7 +556,11 @@ function initServices(): void {
       updateAutoLaunch(next);
     },
     onRefreshNow: () => {
-      void scheduler?.refreshNow();
+      if (replayEngine) {
+        replayEngine.start();
+      } else {
+        void scheduler?.refreshNow();
+      }
     },
     onOpenSettings: () => {
       windowManager?.openDetail({ tab: 'settings' });
@@ -532,37 +573,65 @@ function initServices(): void {
     onQuit: requestQuit,
   });
 
-  const tencentProvider = new TencentProvider();
-  const sinaProvider = new SinaProvider();
-  const eastmoneyProvider = new EastmoneyProvider();
-  hithinkProvider = new HithinkProvider({ secretStore });
+  if (replayCliOptions) {
+    replayEngine = new DayReplayEngine({
+      database,
+      tradeDate: replayCliOptions.tradeDate,
+      stepIntervalMs: replayCliOptions.stepIntervalMs,
+      energyConfig: {
+        expandThresholdPct: initialMonitorConfig.expandThresholdPct,
+        shrinkThresholdPct: initialMonitorConfig.shrinkThresholdPct,
+        slopeWindow: initialMonitorConfig.slopeWindow,
+      },
+      alertConfig: {
+        enabled: initialMonitorConfig.alertsEnabled,
+        surgeSlopeThreshold: initialMonitorConfig.surgeSlopeThreshold,
+        surgeMultipleThreshold: initialMonitorConfig.surgeMultipleThreshold,
+        shrinkSlopeThreshold: initialMonitorConfig.shrinkSlopeThreshold,
+        shrinkMultipleThreshold: initialMonitorConfig.shrinkMultipleThreshold,
+        matchMode: initialMonitorConfig.matchMode,
+        cooldownMinutes: initialMonitorConfig.cooldownMinutes,
+        slopeWindow: initialMonitorConfig.slopeWindow,
+      },
+      onStateUpdate: broadcastMarketState,
+      onReplayAlert: (payload) => {
+        // 回放告警仅驱动界面呼吸高亮与事件流展示，不入实盘库、不弹系统通知
+        windowManager?.broadcast(IPC_CHANNELS.ALERT_TRIGGERED, payload);
+      },
+    });
+  } else {
+    const tencentProvider = new TencentProvider();
+    const sinaProvider = new SinaProvider();
+    const eastmoneyProvider = new EastmoneyProvider();
+    hithinkProvider = new HithinkProvider({ secretStore });
 
-  scheduler = new PollingScheduler({
-    database,
-    primarySnapshotProvider: tencentProvider,
-    secondarySnapshotProvider: sinaProvider,
-    hithinkProvider,
-    primaryIntradayProvider: tencentProvider,
-    secondaryIntradayProvider: eastmoneyProvider,
-    configuredIntervalSec: initialMonitorConfig.pollingIntervalSec,
-    energyConfig: {
-      expandThresholdPct: initialMonitorConfig.expandThresholdPct,
-      shrinkThresholdPct: initialMonitorConfig.shrinkThresholdPct,
-      slopeWindow: initialMonitorConfig.slopeWindow,
-    },
-    alertConfig: {
-      enabled: initialMonitorConfig.alertsEnabled,
-      surgeSlopeThreshold: initialMonitorConfig.surgeSlopeThreshold,
-      surgeMultipleThreshold: initialMonitorConfig.surgeMultipleThreshold,
-      shrinkSlopeThreshold: initialMonitorConfig.shrinkSlopeThreshold,
-      shrinkMultipleThreshold: initialMonitorConfig.shrinkMultipleThreshold,
-      matchMode: initialMonitorConfig.matchMode,
-      cooldownMinutes: initialMonitorConfig.cooldownMinutes,
-      slopeWindow: initialMonitorConfig.slopeWindow,
-    },
-    onStateUpdate: broadcastMarketState,
-    onAlertTriggered: handleAlertTriggered,
-  });
+    scheduler = new PollingScheduler({
+      database,
+      primarySnapshotProvider: tencentProvider,
+      secondarySnapshotProvider: sinaProvider,
+      hithinkProvider,
+      primaryIntradayProvider: tencentProvider,
+      secondaryIntradayProvider: eastmoneyProvider,
+      configuredIntervalSec: initialMonitorConfig.pollingIntervalSec,
+      energyConfig: {
+        expandThresholdPct: initialMonitorConfig.expandThresholdPct,
+        shrinkThresholdPct: initialMonitorConfig.shrinkThresholdPct,
+        slopeWindow: initialMonitorConfig.slopeWindow,
+      },
+      alertConfig: {
+        enabled: initialMonitorConfig.alertsEnabled,
+        surgeSlopeThreshold: initialMonitorConfig.surgeSlopeThreshold,
+        surgeMultipleThreshold: initialMonitorConfig.surgeMultipleThreshold,
+        shrinkSlopeThreshold: initialMonitorConfig.shrinkSlopeThreshold,
+        shrinkMultipleThreshold: initialMonitorConfig.shrinkMultipleThreshold,
+        matchMode: initialMonitorConfig.matchMode,
+        cooldownMinutes: initialMonitorConfig.cooldownMinutes,
+        slopeWindow: initialMonitorConfig.slopeWindow,
+      },
+      onStateUpdate: broadcastMarketState,
+      onAlertTriggered: handleAlertTriggered,
+    });
+  }
 }
 
 if (!singleInstanceLock) {
@@ -584,14 +653,21 @@ if (!singleInstanceLock) {
     }
 
     windowManager?.createHudWindow();
-    trayManager?.init(buildShellState(), scheduler?.getLatestState() ?? null);
+    trayManager?.init(
+      buildShellState(),
+      replayEngine?.getLatestState() ?? scheduler?.getLatestState() ?? null
+    );
 
-    void scheduler?.start().catch((err: unknown) => {
-      console.error(
-        '[main] PollingScheduler start failed:',
-        err instanceof Error ? err.message : String(err)
-      );
-    });
+    if (replayEngine) {
+      replayEngine.start();
+    } else {
+      void scheduler?.start().catch((err: unknown) => {
+        console.error(
+          '[main] PollingScheduler start failed:',
+          err instanceof Error ? err.message : String(err)
+        );
+      });
+    }
 
     app.on('activate', () => {
       windowManager?.showHud();
@@ -612,6 +688,8 @@ if (!singleInstanceLock) {
     bossKeyManager = null;
     trayManager?.destroy();
     trayManager = null;
+    replayEngine?.stop();
+    replayEngine = null;
     scheduler?.stop();
     scheduler = null;
     hithinkProvider = null;

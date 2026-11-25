@@ -139,6 +139,19 @@ export interface MarketTotalState {
   degradedReason: string | null;
 }
 
+/** 开发态全天历史回放进度元信息 */
+export interface ReplayStatusInfo {
+  active: boolean;
+  tradeDate: string;
+  prevTradeDate: string | null;
+  /** 当前帧序号（0 = 09:25 集合竞价，1..240 = minuteIndex 0..239） */
+  stepIndex: number;
+  totalSteps: number;
+  currentTimeLabel: string;
+  stepIntervalMs: number;
+  finished: boolean;
+}
+
 /** 采集调度器与数据源运行态（向渲染进程暴露） */
 export interface CollectorStatus {
   mode: CollectorMode;
@@ -157,6 +170,8 @@ export interface CollectorStatus {
   stale: boolean;
   degraded: boolean;
   degradedReasons: string[];
+  /** 仅在 --replay 全天回放模式下存在 */
+  replay?: ReplayStatusInfo | null;
 }
 
 /** 推送给渲染进程的完整看板状态 */
@@ -236,6 +251,8 @@ export interface AlertEventRow extends AlertEventInput {
 export interface AlertDispatchPayload extends AlertEventRow {
   /** 是否为开发态模拟测试事件 */
   isSimulated: boolean;
+  /** 是否为 --replay 全天历史回放事件（不写入实盘 alert_events、不弹系统通知） */
+  isReplay?: boolean;
   /** 派发瞬间应用是否处于静音状态（静音时渲染进程不播放提示音） */
   muted: boolean;
 }

@@ -36,7 +36,10 @@ export function formatVolumeStateLabel(state: VolumeStateType | undefined): stri
  * - 数据降级或陈旧时明确标注「降级」/「陈旧」
  */
 export function formatTrayTooltip(state: MarketDashboardState | null): string {
-  const title = 'A股实时能量看板';
+  const replay = state?.status.replay;
+  const title = replay?.active
+    ? `A股能量看板 [回放 ${replay.tradeDate} ${replay.currentTimeLabel}]`
+    : 'A股实时能量看板';
   if (!state) {
     return `${title}\n数据初始化中…`;
   }
