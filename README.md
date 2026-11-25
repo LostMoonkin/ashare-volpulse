@@ -154,17 +154,17 @@ npm run test
 # 构建 Electron 生产产物（out/）
 npm run build
 
-# 打包 Windows 单文件便携版 .exe（输出至 release/）
+# 打包 Windows 绿色解压版 .zip（自动同步最新 git tag 版本，输出至 release/）
 npm run package:win
 
-# 打包 macOS Apple Silicon + Intel 安装包 .dmg / .zip（需在 macOS 下执行）
+# 打包 macOS Apple Silicon + Intel 安装包 .dmg（需在 macOS 下执行）
 npm run package:mac
 ```
 
 > **macOS 首次运行提示**：自动构建产物当前未做 Apple 开发者公证，若首次双击提示「无法验证开发者」或「已损坏」，请在终端执行 `xattr -cr "/Applications/A股能量看板.app"` 后重新打开，或在「系统设置 → 隐私与安全性」中点击「仍要打开」。
 
 ### 双平台自动发布（GitHub Release）
-项目已配置 [.github/workflows/release.yml](.github/workflows/release.yml)，推送 `v*` 格式标签即可自动并行构建 Windows（x64 便携 `.exe`）与 macOS（`arm64` / `x64` `.dmg` 与 `.zip`）并附带 `SHA256SUMS.txt` 发布至 GitHub Release：
+项目已配置 [.github/workflows/release.yml](.github/workflows/release.yml)，推送 `v*` 格式标签即可自动并行构建 Windows（x64 免安装解压版 `.zip`）与 macOS（`arm64` / `x64` `.dmg`）并附带 `SHA256SUMS.txt` 发布至 GitHub Release：
 
 ```bash
 git tag v0.1.0

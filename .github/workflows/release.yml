@@ -25,13 +25,12 @@ jobs:
             os: windows-latest
             package_script: package:win
             artifact_pattern: |
-              release/*.exe
+              release/*.zip
           - platform: macos
             os: macos-latest
             package_script: package:mac
             artifact_pattern: |
               release/*.dmg
-              release/*.zip
 
     steps:
       - name: Checkout repository
@@ -96,7 +95,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            artifacts/*.exe
-            artifacts/*.dmg
             artifacts/*.zip
+            artifacts/*.dmg
             artifacts/SHA256SUMS.txt

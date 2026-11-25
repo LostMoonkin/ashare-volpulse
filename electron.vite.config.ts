@@ -13,6 +13,7 @@ export default defineConfig({
       },
     },
     build: {
+      minify: true,
       rollupOptions: {
         external: ['node:sqlite'],
       },
@@ -24,6 +25,9 @@ export default defineConfig({
       alias: {
         '@shared': resolve('src/shared'),
       },
+    },
+    build: {
+      minify: true,
     },
   },
   renderer: {
@@ -37,6 +41,7 @@ export default defineConfig({
     },
     plugins: [react()],
     build: {
+      minify: true,
       rollupOptions: {
         input: resolve('src/renderer/index.html'),
       },
