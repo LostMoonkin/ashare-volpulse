@@ -17,10 +17,12 @@
     "noEmit": true,
     "paths": {
       "@shared/*": ["./src/shared/*"],
+      "@core/*": ["./src/core/*"],
       "@renderer/*": ["./src/renderer/src/*"]
     }
   },
   "include": [
+    "src/core/**/*",
     "src/shared/**/*",
     "src/renderer/src/**/*",
     "src/preload/index.ts",

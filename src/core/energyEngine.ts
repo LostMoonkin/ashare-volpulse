@@ -2,14 +2,15 @@
  * 统一能量计算引擎（纯 TypeScript，零 IO）
  *
  * 适用于沪深两市聚合（MARKET_TOTAL）、四大核心指数及任意自选个股。
- * 所有数学公式严格对齐 docs/PLAN.md §2.3：
+ * 所有数学公式严格对齐 docs/PLAN.md §2.3（方案 A：边际量比归一化）：
  * - 未闭合分钟线性插值对齐昨日同期：A_prev_aligned(t) = A_prev(t-1) + (s / 60) * Δa_prev(t)
  * - 同比差额 ΔA(t) = A_today(t) - A_prev_aligned(t)
  * - 同比变化率 R(t) = ΔA(t) / A_prev_aligned(t)（仅当分母 > 0）
  * - 全天预测成交额 Â_full(t) = A_prev_full * (A_today(t) / A_prev_aligned(t))
  * - 放/平/缩量状态：R(t)*100 >= +5% 放量，<= -5% 缩量，其余平量，不可计算为 UNAVAILABLE
- * - OLS 滚动斜率 S_W(t)：对窗口 [t-W+1, t] 的 {(k, R(k)*100)} 做普通最小二乘回归（百分点/分钟）
  * - 滚动区间增量倍数 M_W(t) = (A_today(t) - A_today(t-W)) / (A_prev_aligned(t) - A_prev(t-W))
+ *   与滚动边际量比偏离 D_W(t) = (M_W(t) - 1) * 100%（k ∈ [1, W-1] 使用纯连续竞价前缀 A(k)-A(0)）
+ * - 边际量比趋势斜率 S_W(t)：对窗口 [t-W+1, t]（t >= W，全程不含 09:25 集合竞价）的 {(k, D_W(k))} 做 OLS 回归（百分点/分钟）
  */
 
 export type VolumeState = 'EXPANDING' | 'FLAT' | 'SHRINKING' | 'UNAVAILABLE';
@@ -68,10 +69,12 @@ export interface EnergyMetrics {
   /** 全天预测成交额 Â_full(t)（元），无法计算或无昨日全天额时为 null */
   readonly predictedFullDayTurnover: number | null;
   readonly volumeState: VolumeState;
-  /** OLS 滚动斜率 S_W(t)（百分点/分钟），窗口不足或任一点不可用时为 null */
+  /** 边际量比趋势斜率 S_W(t)（百分点/分钟），对最近 W 个连续时刻的 D_W(k) 做 OLS 回归 */
   readonly slope: number | null;
   /** 滚动区间增量倍数 M_W(t)（倍），分母 <= 0 或窗口点缺失时为 null */
   readonly windowMultiple: number | null;
+  /** 滚动边际量比偏离 D_W(t) = (M_W(t) - 1) * 100（百分比），无法计算时为 null */
+  readonly windowDeviationPct: number | null;
   readonly slopeWindow: number;
 }
 
@@ -166,6 +169,46 @@ export function alignPrevCumTurnover(
 }
 
 /**
+ * 计算时刻 k 的滚动边际量比倍数 M_W(k)：
+ * - k < 1 返回 null（第 0 分钟混有 09:25 集合竞价，不进入边际量比曲线）
+ * - k >= W 时取满窗口增量 A(k) - A(k - W)
+ * - 1 <= k < W 时取纯连续竞价前缀增量 A(k) - A(0)，彻底剔除 09:25 竞价污染
+ */
+function computeWindowMultipleAt(params: {
+  todayMap: ReadonlyMap<number, number>;
+  prevMap: ReadonlyMap<number, number>;
+  k: number;
+  window: number;
+  todayOverride?: number | null;
+  prevOverride?: number | null;
+}): number | null {
+  const { todayMap, prevMap, k, window, todayOverride, prevOverride } = params;
+  if (!Number.isInteger(window) || window < 1 || k < 1) return null;
+
+  const anchorIndex = k >= window ? k - window : 0;
+  const todayVal = todayOverride !== undefined ? todayOverride : todayMap.get(k) ?? null;
+  const prevVal = prevOverride !== undefined ? prevOverride : prevMap.get(k) ?? null;
+  const todayAnchor = todayMap.get(anchorIndex);
+  const prevAnchor = prevMap.get(anchorIndex);
+
+  if (
+    todayVal === null ||
+    prevVal === null ||
+    todayAnchor === undefined ||
+    prevAnchor === undefined
+  ) {
+    return null;
+  }
+
+  const todayDelta = todayVal - todayAnchor;
+  const prevDelta = prevVal - prevAnchor;
+  if (prevDelta <= 0 || todayDelta < 0) {
+    return null;
+  }
+  return todayDelta / prevDelta;
+}
+
+/**
  * 计算单个标的（大盘聚合、四大指数或任意个股）在指定时刻的能量指标。
  */
 export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
@@ -217,51 +260,63 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
     }
   }
 
-  // 指标 A：OLS 滚动斜率 S_W(t)（仅在折叠后的连续 minuteIndex 窗口 [t - W + 1, t] 上计算）
   const W = cfg.slopeWindow;
-  let slope: number | null = null;
-  if (Number.isInteger(W) && W >= 2 && t - W + 1 >= 0) {
-    const windowPoints: Array<[number, number]> = [];
-    let allValid = true;
-    for (let k = t - W + 1; k <= t; k++) {
-      if (k === t) {
-        if (cumRatioPct === null) {
-          allValid = false;
-          break;
-        }
-        windowPoints.push([k, cumRatioPct]);
-      } else {
-        const tk = todayMap.get(k);
-        const pk = prevMap.get(k);
-        if (tk === undefined || pk === undefined || pk <= 0) {
-          allValid = false;
-          break;
-        }
-        windowPoints.push([k, ((tk - pk) / pk) * 100]);
-      }
-    }
-    if (allValid && windowPoints.length === W) {
-      slope = computeOlsSlope(windowPoints);
+
+  // 指标 A：滚动区间增量倍数 M_W(t)（仅 t >= W 满窗口输出）与边际量比偏离 D_W(t)
+  let windowMultiple: number | null = null;
+  if (Number.isInteger(W) && W >= 1 && t >= W) {
+    windowMultiple = computeWindowMultipleAt({
+      todayMap,
+      prevMap,
+      k: t,
+      window: W,
+      todayOverride: todayAtT,
+      prevOverride: prevAlignedAtT,
+    });
+  }
+
+  // 对 t ∈ [1, W-1] 也可给出纯连续竞价前缀偏离用于图表连贯绘制；对 t >= W 严格等于 (M_W(t) - 1) * 100
+  let windowDeviationPct: number | null = null;
+  if (windowMultiple !== null) {
+    windowDeviationPct = (windowMultiple - 1) * 100;
+  } else if (Number.isInteger(W) && W >= 1 && t >= 1 && t < W) {
+    const prefixMult = computeWindowMultipleAt({
+      todayMap,
+      prevMap,
+      k: t,
+      window: W,
+      todayOverride: todayAtT,
+      prevOverride: prevAlignedAtT,
+    });
+    if (prefixMult !== null) {
+      windowDeviationPct = (prefixMult - 1) * 100;
     }
   }
 
-  // 指标 B：滚动区间增量倍数 M_W(t) = (A_today(t) - A_today(t-W)) / (A_prev_aligned(t) - A_prev(t-W))
-  let windowMultiple: number | null = null;
-  if (
-    Number.isInteger(W) &&
-    W >= 1 &&
-    t - W >= 0 &&
-    todayAtT !== null &&
-    prevAlignedAtT !== null
-  ) {
-    const todayAnchor = todayMap.get(t - W);
-    const prevAnchor = prevMap.get(t - W);
-    if (todayAnchor !== undefined && prevAnchor !== undefined) {
-      const todayDelta = todayAtT - todayAnchor;
-      const prevDelta = prevAlignedAtT - prevAnchor;
-      if (prevDelta > 0 && todayDelta >= 0) {
-        windowMultiple = todayDelta / prevDelta;
+  // 指标 B：边际量比趋势斜率 S_W(t) — 对最近 W 个连续时刻 [t - W + 1, t] 的 D_W(k) 做 OLS 线性回归
+  // 要求 t >= W（使窗口起点 t - W + 1 >= 1，全程剔除 09:25 竞价污染，且早盘尾盘量纲完全一致）
+  let slope: number | null = null;
+  if (Number.isInteger(W) && W >= 2 && t >= W) {
+    const windowPoints: Array<[number, number]> = [];
+    let allValid = true;
+    for (let k = t - W + 1; k <= t; k++) {
+      const mult =
+        k === t
+          ? windowMultiple
+          : computeWindowMultipleAt({
+              todayMap,
+              prevMap,
+              k,
+              window: W,
+            });
+      if (mult === null) {
+        allValid = false;
+        break;
       }
+      windowPoints.push([k, (mult - 1) * 100]);
+    }
+    if (allValid && windowPoints.length === W) {
+      slope = computeOlsSlope(windowPoints);
     }
   }
 
@@ -277,6 +332,7 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
     volumeState,
     slope,
     windowMultiple,
+    windowDeviationPct,
     slopeWindow: W,
   };
 }

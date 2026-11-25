@@ -4,17 +4,27 @@ import type {
   AlertEventRow,
   BootstrapState,
   BossKeyStatus,
+  DatabaseRetentionStats,
   DesktopShellState,
   MarketDashboardState,
+  MonitorConfig,
   OpenDetailOptions,
+  ProviderHealthStatus,
   SecretStatus,
   TickerSearchResult,
+  WatchlistAddInput,
+  WatchlistItemRow,
+  WatchlistUpdateInput,
 } from './types';
 
 /** 主进程与渲染进程共享 IPC 通道定义 */
 export const IPC_CHANNELS = {
   APP_GET_BOOTSTRAP_STATE: 'app:get-bootstrap-state',
   SECRET_GET_STATUS: 'secret:get-status',
+  SECRET_SAVE_KEY: 'secret:save-key',
+  SECRET_CLEAR_KEY: 'secret:clear-key',
+  SECRET_TEST_CONNECTION: 'secret:test-connection',
+  DB_GET_RETENTION_STATS: 'db:get-retention-stats',
   MARKET_GET_STATE: 'market:get-state',
   MARKET_REFRESH_NOW: 'market:refresh-now',
   MARKET_STATE_UPDATED: 'market:state-updated',
@@ -22,6 +32,14 @@ export const IPC_CHANNELS = {
   ALERT_GET_RECENT: 'alert:get-recent',
   ALERT_SIMULATE: 'alert:simulate',
   TICKER_SEARCH: 'ticker:search',
+  MONITOR_GET_CONFIG: 'monitor:get-config',
+  MONITOR_UPDATE_CONFIG: 'monitor:update-config',
+  MONITOR_CONFIG_UPDATED: 'monitor:config-updated',
+  WATCHLIST_GET_ALL: 'watchlist:get-all',
+  WATCHLIST_ADD: 'watchlist:add',
+  WATCHLIST_REMOVE: 'watchlist:remove',
+  WATCHLIST_REORDER: 'watchlist:reorder',
+  WATCHLIST_UPDATE: 'watchlist:update',
   SHELL_GET_STATE: 'shell:get-state',
   SHELL_STATE_UPDATED: 'shell:state-updated',
   SHELL_OPEN_DETAIL: 'shell:open-detail',
@@ -38,9 +56,20 @@ export const IPC_CHANNELS = {
 export interface PreloadApi {
   getBootstrapState(): Promise<BootstrapState>;
   getSecretStatus(): Promise<SecretStatus>;
+  saveSecretApiKey(apiKey: string): Promise<SecretStatus>;
+  clearSecretApiKey(): Promise<SecretStatus>;
+  testHithinkConnection(): Promise<ProviderHealthStatus>;
+  getDatabaseRetentionStats(): Promise<DatabaseRetentionStats>;
   getMarketState(): Promise<MarketDashboardState | null>;
   refreshMarketNow(): Promise<MarketDashboardState | null>;
   searchTickers(keyword: string, limit?: number): Promise<TickerSearchResult[]>;
+  getMonitorConfig(): Promise<MonitorConfig>;
+  updateMonitorConfig(patch: Partial<MonitorConfig>): Promise<MonitorConfig>;
+  getWatchlist(): Promise<WatchlistItemRow[]>;
+  addWatchlistItem(input: WatchlistAddInput): Promise<WatchlistItemRow[]>;
+  removeWatchlistItem(symbol: string): Promise<WatchlistItemRow[]>;
+  reorderWatchlist(symbols: string[]): Promise<WatchlistItemRow[]>;
+  updateWatchlistItem(input: WatchlistUpdateInput): Promise<WatchlistItemRow[]>;
   getShellState(): Promise<DesktopShellState>;
   openDetail(options?: OpenDetailOptions): Promise<DesktopShellState>;
   hideDetail(): Promise<DesktopShellState>;
@@ -55,4 +84,5 @@ export interface PreloadApi {
   onMarketStateUpdated(listener: (state: MarketDashboardState) => void): () => void;
   onAlertTriggered(listener: (event: AlertDispatchPayload) => void): () => void;
   onShellStateUpdated(listener: (state: DesktopShellState) => void): () => void;
+  onMonitorConfigUpdated(listener: (config: MonitorConfig) => void): () => void;
 }

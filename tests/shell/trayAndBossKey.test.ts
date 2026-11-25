@@ -140,6 +140,7 @@ function makeDashboardState(overrides?: {
               volumeState: overrides?.volumeState ?? 'EXPANDING',
               slope: 0.85,
               windowMultiple: 1.25,
+              windowDeviationPct: 25,
               slopeWindow: 5,
             },
       todaySeries: [],

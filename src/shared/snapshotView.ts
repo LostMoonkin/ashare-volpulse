@@ -48,3 +48,19 @@ export function resolveSymbolChangePct(item: SymbolEnergySnapshot | null | undef
   }
   return null;
 }
+
+/**
+ * 读取单标的最新价格/点位：优先实时快照，复盘无快照时回退至分时序列末点价格。
+ */
+export function resolveSymbolPrice(item: SymbolEnergySnapshot | null | undefined): number | null {
+  if (!item) return null;
+  if (item.quote && Number.isFinite(item.quote.price) && item.quote.price > 0) {
+    return item.quote.price;
+  }
+  const lastToday =
+    item.todaySeries.length > 0 ? item.todaySeries[item.todaySeries.length - 1] : null;
+  if (lastToday && Number.isFinite(lastToday.price) && lastToday.price > 0) {
+    return lastToday.price;
+  }
+  return null;
+}

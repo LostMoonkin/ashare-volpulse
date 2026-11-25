@@ -14,8 +14,9 @@ function makeMetrics(overrides: Partial<EnergyMetrics>): EnergyMetrics {
     cumRatioPct: 20,
     predictedFullDayTurnover: 24_000,
     volumeState: 'EXPANDING',
-    slope: 1.5,
+    slope: 4.5,
     windowMultiple: 1.8,
+    windowDeviationPct: 80,
     slopeWindow: 5,
     ...overrides,
   };
@@ -43,7 +44,7 @@ describe('AlertEngine', () => {
       name: '沪深两市',
       tradeDate: d,
       timestampMs: shanghaiToTimestampMs(d, 9, 35, 0),
-      metrics: makeMetrics({ minuteIndex: 5, slope: 1.5, windowMultiple: 1.6 }),
+      metrics: makeMetrics({ minuteIndex: 5, slope: 3.5, windowMultiple: 1.6 }),
     });
     expect(at0935.triggered).toBe(true);
     expect(at0935.direction).toBe('SURGE');
@@ -62,7 +63,7 @@ describe('AlertEngine', () => {
       name: '贵州茅台',
       tradeDate: d,
       timestampMs: t0,
-      metrics: makeMetrics({ minuteIndex: 30, slope: 1.4, windowMultiple: 1.7 }),
+      metrics: makeMetrics({ minuteIndex: 30, slope: 3.4, windowMultiple: 1.7 }),
     });
     expect(first.triggered).toBe(true);
     expect(first.direction).toBe('SURGE');
@@ -73,7 +74,7 @@ describe('AlertEngine', () => {
       name: '贵州茅台',
       tradeDate: d,
       timestampMs: t0 + 4 * 60_000 + 59_000,
-      metrics: makeMetrics({ minuteIndex: 34, slope: 2.0, windowMultiple: 2.2 }),
+      metrics: makeMetrics({ minuteIndex: 34, slope: 4.0, windowMultiple: 2.2 }),
     });
     expect(withinCooldown.triggered).toBe(false);
     expect(withinCooldown.skipReason).toBe('COOLDOWN');
@@ -86,7 +87,7 @@ describe('AlertEngine', () => {
       timestampMs: t0 + 2 * 60_000,
       metrics: makeMetrics({
         minuteIndex: 32,
-        slope: -1.5,
+        slope: -3.5,
         windowMultiple: 0.55,
         cumRatio: -0.06,
         cumRatioPct: -6,
@@ -102,7 +103,7 @@ describe('AlertEngine', () => {
       name: '贵州茅台',
       tradeDate: d,
       timestampMs: t0 + 5 * 60_000,
-      metrics: makeMetrics({ minuteIndex: 35, slope: 1.6, windowMultiple: 1.8 }),
+      metrics: makeMetrics({ minuteIndex: 35, slope: 3.6, windowMultiple: 1.8 }),
     });
     expect(afterCooldown.triggered).toBe(true);
     expect(afterCooldown.direction).toBe('SURGE');
@@ -119,7 +120,7 @@ describe('AlertEngine', () => {
       name: '宁德时代',
       tradeDate: d,
       timestampMs: ts,
-      metrics: makeMetrics({ minuteIndex: 45, slope: 1.8, windowMultiple: 1.3 }),
+      metrics: makeMetrics({ minuteIndex: 45, slope: 3.8, windowMultiple: 1.3 }),
     });
     expect(andMiss.triggered).toBe(false);
     expect(andMiss.skipReason).toBe('NO_SIGNAL');
@@ -130,7 +131,7 @@ describe('AlertEngine', () => {
       name: '宁德时代',
       tradeDate: d,
       timestampMs: ts,
-      metrics: makeMetrics({ minuteIndex: 45, slope: 1.8, windowMultiple: 1.3 }),
+      metrics: makeMetrics({ minuteIndex: 45, slope: 3.8, windowMultiple: 1.3 }),
       symbolOverride: { matchMode: 'OR' },
     });
     expect(orHit.triggered).toBe(true);
@@ -142,8 +143,8 @@ describe('AlertEngine', () => {
       name: '上证指数',
       tradeDate: d,
       timestampMs: ts,
-      metrics: makeMetrics({ minuteIndex: 45, slope: 1.5, windowMultiple: 1.6 }),
-      symbolOverride: { surgeSlopeThreshold: 2.0 },
+      metrics: makeMetrics({ minuteIndex: 45, slope: 3.5, windowMultiple: 1.6 }),
+      symbolOverride: { surgeSlopeThreshold: 5.0 },
     });
     expect(strictMiss.triggered).toBe(false);
 
@@ -219,13 +220,13 @@ describe('AlertEngine', () => {
     const d = '2026-11-24';
     const ts = shanghaiToTimestampMs(d, 10, 25, 0);
 
-    // 精准命中阈值边界（+1.2 / 1.5 与 -1.2 / 0.65）应触发
+    // 精准命中阈值边界（+3.0 / 1.5 与 -3.0 / 0.65）应触发
     const exactSurge = engine.evaluate({
       symbol: '000001.SH',
       name: '上证指数',
       tradeDate: d,
       timestampMs: ts,
-      metrics: makeMetrics({ minuteIndex: 55, slope: 1.2, windowMultiple: 1.5, slopeWindow: 5 }),
+      metrics: makeMetrics({ minuteIndex: 55, slope: 3.0, windowMultiple: 1.5, slopeWindow: 5 }),
     });
     expect(exactSurge.triggered).toBe(true);
     expect(exactSurge.direction).toBe('SURGE');
@@ -237,7 +238,7 @@ describe('AlertEngine', () => {
       timestampMs: ts,
       metrics: makeMetrics({
         minuteIndex: 55,
-        slope: -1.2,
+        slope: -3.0,
         windowMultiple: 0.65,
         cumRatio: -0.06,
         slopeWindow: 5,
@@ -252,7 +253,7 @@ describe('AlertEngine', () => {
       name: '宁德时代',
       tradeDate: d,
       timestampMs: ts,
-      metrics: makeMetrics({ minuteIndex: 55, slope: 2.0, windowMultiple: 2.0, slopeWindow: 5 }),
+      metrics: makeMetrics({ minuteIndex: 55, slope: 4.0, windowMultiple: 2.0, slopeWindow: 5 }),
       symbolOverride: { slopeWindow: 3 },
     });
     expect(windowMismatch.triggered).toBe(false);
@@ -264,7 +265,7 @@ describe('AlertEngine', () => {
       name: '宁德时代',
       tradeDate: d,
       timestampMs: ts,
-      metrics: makeMetrics({ minuteIndex: 55, slope: 2.0, windowMultiple: 2.0, slopeWindow: 3 }),
+      metrics: makeMetrics({ minuteIndex: 55, slope: 4.0, windowMultiple: 2.0, slopeWindow: 3 }),
       symbolOverride: { slopeWindow: 3 },
     });
     expect(windowMatched.triggered).toBe(true);

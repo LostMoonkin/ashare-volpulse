@@ -154,7 +154,7 @@ export class AlertDispatcher {
         : MONITORED_INDEX_NAMES[symbol] ?? symbol);
 
     const isSurge = direction === 'SURGE';
-    const slope = isSurge ? 1.85 : -1.68;
+    const slope = isSurge ? 4.85 : -4.68;
     const windowMultiple = isSurge ? 1.72 : 0.54;
     const cumRatio = isSurge ? 0.146 : -0.118;
     const dirLabel = isSurge ? '快速放量' : '快速缩量';

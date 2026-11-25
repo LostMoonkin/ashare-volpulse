@@ -91,6 +91,7 @@ export interface SymbolEnergyMetricsView {
   volumeState: VolumeStateType;
   slope: number | null;
   windowMultiple: number | null;
+  windowDeviationPct: number | null;
   slopeWindow: number;
 }
 
@@ -282,6 +283,59 @@ export interface DesktopShellState {
   /** 每次主进程主动打开/导航详情浮层时递增，避免普通设置同步覆盖用户当前页签 */
   detailFocusSeq: number;
   isDev: boolean;
+}
+
+export type SlopeWindowOption = 3 | 5 | 10;
+
+export type AlertMatchModeType = 'AND' | 'OR';
+
+/** 监控与告警全局配置（存入 SQLite app_settings，修改后即时作用于调度与告警引擎） */
+export interface MonitorConfig {
+  /** 盘中快照轮询周期（3–15 秒） */
+  pollingIntervalSec: number;
+  /** 放量判定阈值（百分比，如 5 表示 +5%） */
+  expandThresholdPct: number;
+  /** 缩量判定阈值（百分比，如 -5 表示 -5%） */
+  shrinkThresholdPct: number;
+  /** 滚动斜率与区间倍数窗口（3 / 5 / 10 分钟） */
+  slopeWindow: SlopeWindowOption;
+  /** 全局告警总开关 */
+  alertsEnabled: boolean;
+  /** 快速放量斜率阈值（百分点/分钟，正数） */
+  surgeSlopeThreshold: number;
+  /** 快速放量区间增量倍数阈值（> 1） */
+  surgeMultipleThreshold: number;
+  /** 快速缩量斜率阈值（百分点/分钟，负数） */
+  shrinkSlopeThreshold: number;
+  /** 快速缩量区间增量倍数阈值（0 < x < 1） */
+  shrinkMultipleThreshold: number;
+  /** 双指标触发组合模式（AND=且，OR=或） */
+  matchMode: AlertMatchModeType;
+  /** 同标的同方向冷却时长（分钟） */
+  cooldownMinutes: number;
+}
+
+/** 单只自选股自定义告警阈值覆写（序列化存入 watchlist.custom_thresholds_json） */
+export interface WatchlistThresholdOverride {
+  slopeWindow?: SlopeWindowOption;
+  surgeSlopeThreshold?: number;
+  surgeMultipleThreshold?: number;
+  shrinkSlopeThreshold?: number;
+  shrinkMultipleThreshold?: number;
+  matchMode?: AlertMatchModeType;
+  cooldownMinutes?: number;
+}
+
+export interface WatchlistAddInput {
+  symbol: string;
+  name: string;
+}
+
+export interface WatchlistUpdateInput {
+  symbol: string;
+  alertEnabled?: boolean;
+  /** 传入 null 表示清除自定义阈值，恢复跟随全局默认 */
+  customThresholds?: WatchlistThresholdOverride | null;
 }
 
 /** 30 交易日滚动清理执行结果 */

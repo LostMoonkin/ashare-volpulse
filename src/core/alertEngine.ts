@@ -6,8 +6,8 @@ import type { EnergyMetrics } from './energyEngine';
  *
  * 规则严格对齐 docs/PLAN.md §2.3 与 Phase 2 Spec：
  * - 冷启动保护：minuteIndex < 5（09:30–09:34）不触发；09:35（minuteIndex = 5）起可触发。
- * - 快速放量（SURGE）：S_W(t) >= +1.2%/min 且/或 M_W(t) >= 1.5x（默认 AND）。
- * - 快速缩量（SHRINK）：S_W(t) <= -1.2%/min 且/或 M_W(t) <= 0.65x（默认 AND）。
+ * - 快速放量（SURGE）：边际量比斜率 S_W(t) >= +3.0%/min 且/或 M_W(t) >= 1.5x（默认 AND）。
+ * - 快速缩量（SHRINK）：边际量比斜率 S_W(t) <= -3.0%/min 且/或 M_W(t) <= 0.65x（默认 AND）。
  * - 任一核心指标不可用（null）或标的处于 degraded 状态时不触发。
  * - 全局默认阈值可被单个标的覆写（开关、阈值、窗口、匹配模式、冷却时长）。
  * - 冷却防抖按 (symbol, direction) 独立计时（默认 5 分钟），反方向可即时触发。
@@ -39,9 +39,9 @@ export type SymbolAlertOverride = Partial<AlertRuleConfig>;
 
 export const DEFAULT_ALERT_CONFIG: AlertRuleConfig = {
   enabled: true,
-  surgeSlopeThreshold: 1.2,
+  surgeSlopeThreshold: 3.0,
   surgeMultipleThreshold: 1.5,
-  shrinkSlopeThreshold: -1.2,
+  shrinkSlopeThreshold: -3.0,
   shrinkMultipleThreshold: 0.65,
   matchMode: 'AND',
   cooldownMinutes: 5,

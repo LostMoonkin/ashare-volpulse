@@ -6,28 +6,34 @@ import {
 } from '../../src/core/energyEngine';
 
 describe('energyEngine', () => {
-  it('matches hand-calculated ΔA, R, predicted full-day turnover, OLS slope S_W, and multiple M_W', () => {
+  it('matches hand-calculated ΔA, R, predicted full-day turnover, marginal deviation D_W, OLS slope S_W, and multiple M_W', () => {
     // 构造 0..10 分钟（共 11 根）：
     // 昨日每分钟匀速成交 100 亿：prev(k) = (k + 1) * 100
-    // 今日在第 0..5 分钟同比均为 0%；第 6..10 分钟同比精确线性递增 +2%/min：
-    //   R(6)=+2%, R(7)=+4%, R(8)=+6%, R(9)=+8%, R(10)=+10%
+    // 今日 0..5 分钟匀速 100；6..10 分钟边际逐分钟递增：
+    //   bar(6)=110, bar(7)=120, bar(8)=130, bar(9)=140, bar(10)=150
+    // 则 W=5 时最近 5 分钟边际量比偏离 D_5(k) = ((today(k)-today(k-5))/500 - 1)*100：
+    //   D_5(6)  = (510/500 - 1)*100 = +2%
+    //   D_5(7)  = (530/500 - 1)*100 = +6%
+    //   D_5(8)  = (560/500 - 1)*100 = +12%
+    //   D_5(9)  = (600/500 - 1)*100 = +20%
+    //   D_5(10) = (650/500 - 1)*100 = +30%
     const prevSeries: MinuteTurnoverPoint[] = [];
     const todaySeries: MinuteTurnoverPoint[] = [];
-    const ratiosPct = [0, 0, 0, 0, 0, 0, 2, 4, 6, 8, 10];
+    const todayBars = [100, 100, 100, 100, 100, 100, 110, 120, 130, 140, 150];
 
+    let todayCum = 0;
     for (let k = 0; k <= 10; k++) {
       const prevCum = (k + 1) * 100;
-      const todayCum = prevCum * (1 + ratiosPct[k] / 100);
+      todayCum += todayBars[k];
       prevSeries.push({ minuteIndex: k, cumTurnover: prevCum });
       todaySeries.push({ minuteIndex: k, cumTurnover: todayCum });
     }
 
     // t = 10, W = 5:
-    //   A_prev(10) = 1100, A_today(10) = 1210
-    //   ΔA = +110, R = +0.10 (+10%), predicted = 24000 * (1210/1100) = 26400
-    //   S_5(10) 对 {(6,2), (7,4), (8,6), (9,8), (10,10)} 做 OLS → 精确斜率 = +2.0 %/min
-    //   M_5(10) = (A_today(10) - A_today(5)) / (A_prev(10) - A_prev(5))
-    //           = (1210 - 600) / (1100 - 600) = 610 / 500 = 1.22x
+    //   A_prev(10) = 1100, A_today(10) = 1250, ΔA = +150, R = +150/1100
+    //   M_5(10) = (1250 - 600) / (1100 - 600) = 650 / 500 = 1.30x
+    //   D_5(10) = +30%
+    //   S_5(10) = OLS([(6,2), (7,6), (8,12), (9,20), (10,30)]) = +7.0 %/min
     const m = evaluateEnergy({
       todaySeries,
       prevSeries,
@@ -36,13 +42,77 @@ describe('energyEngine', () => {
       prevFullDayTurnover: 24_000,
     });
 
-    expect(m.cumDiff).toBeCloseTo(110, 6);
-    expect(m.cumRatio).toBeCloseTo(0.1, 6);
-    expect(m.cumRatioPct).toBeCloseTo(10, 6);
-    expect(m.predictedFullDayTurnover).toBeCloseTo(26_400, 6);
+    expect(m.cumDiff).toBeCloseTo(150, 6);
+    expect(m.cumRatio).toBeCloseTo(150 / 1100, 6);
+    expect(m.cumRatioPct).toBeCloseTo((150 / 1100) * 100, 6);
+    expect(m.predictedFullDayTurnover).toBeCloseTo(24_000 * (1250 / 1100), 6);
     expect(m.volumeState).toBe('EXPANDING');
-    expect(m.slope).toBeCloseTo(2.0, 6);
-    expect(m.windowMultiple).toBeCloseTo(1.22, 6);
+    expect(m.windowMultiple).toBeCloseTo(1.3, 6);
+    expect(m.windowDeviationPct).toBeCloseTo(30.0, 6);
+    expect(m.slope).toBeCloseTo(7.0, 6);
+  });
+
+  it('eliminates false opening dip from heavy auction surge and avoids afternoon large-base damping', () => {
+    // 1. 开盘竞价+首分钟大幅放量 +40%，随后连续竞价稳定放量 +15%
+    //    旧累计斜率公式会算出约 -2.3%/分 的假急缩深坑；方案 A 边际量比应稳定 +15%、斜率为 0%/分
+    const prevSeries: MinuteTurnoverPoint[] = [];
+    const todaySeries: MinuteTurnoverPoint[] = [];
+    let pCum = 300; // 含竞价与 09:30 首分钟
+    let tCum = 420; // 首分钟同比 +40%
+    prevSeries.push({ minuteIndex: 0, cumTurnover: pCum });
+    todaySeries.push({ minuteIndex: 0, cumTurnover: tCum });
+
+    for (let k = 1; k <= 220; k++) {
+      pCum += 100;
+      tCum += 115; // 连续竞价每分钟稳定放量 +15%
+      prevSeries.push({ minuteIndex: k, cumTurnover: pCum });
+      todaySeries.push({ minuteIndex: k, cumTurnover: tCum });
+    }
+
+    const at0935 = evaluateEnergy({ todaySeries, prevSeries, minuteIndex: 5, elapsedSeconds: 60 });
+    expect(at0935.windowMultiple).toBeCloseTo(1.15, 6);
+    expect(at0935.windowDeviationPct).toBeCloseTo(15.0, 6);
+    expect(at0935.slope).toBeCloseTo(0.0, 6);
+
+    // 2. 早盘 t=15 与尾盘 t=215 注入完全同等强度的 5 分钟放量脉冲：
+    //    早盘与尾盘的 M_5、D_5 与斜率 S_5 必须完全一致（零大基数钝化）
+    const makePulseSeries = (pulseStart: number) => {
+      const pArr: MinuteTurnoverPoint[] = [];
+      const tArr: MinuteTurnoverPoint[] = [];
+      let p = 300;
+      let t = 300;
+      pArr.push({ minuteIndex: 0, cumTurnover: p });
+      tArr.push({ minuteIndex: 0, cumTurnover: t });
+      for (let k = 1; k <= 230; k++) {
+        p += 100;
+        const offset = k - pulseStart;
+        const factor = offset >= 0 && offset < 5 ? 1 + (offset + 1) * 0.15 : 1.0;
+        t += 100 * factor;
+        pArr.push({ minuteIndex: k, cumTurnover: p });
+        tArr.push({ minuteIndex: k, cumTurnover: t });
+      }
+      return { pArr, tArr };
+    };
+
+    const morning = makePulseSeries(11);
+    const afternoon = makePulseSeries(211);
+    const mMorning = evaluateEnergy({
+      todaySeries: morning.tArr,
+      prevSeries: morning.pArr,
+      minuteIndex: 15,
+      elapsedSeconds: 60,
+    });
+    const mAfternoon = evaluateEnergy({
+      todaySeries: afternoon.tArr,
+      prevSeries: afternoon.pArr,
+      minuteIndex: 215,
+      elapsedSeconds: 60,
+    });
+
+    expect(mAfternoon.windowMultiple).toBeCloseTo(mMorning.windowMultiple!, 6);
+    expect(mAfternoon.windowDeviationPct).toBeCloseTo(mMorning.windowDeviationPct!, 6);
+    expect(mAfternoon.slope).toBeCloseTo(mMorning.slope!, 6);
+    expect(mAfternoon.slope!).toBeGreaterThan(5);
   });
 
   it('classifies exact ±5% thresholds into EXPANDING / FLAT / SHRINKING correctly', () => {
@@ -62,10 +132,6 @@ describe('energyEngine', () => {
   });
 
   it('prevents false shrink alert at 10 seconds into an unclosed minute via linear interpolation', () => {
-    // 昨日：第 9 分钟累计 1000，第 10 分钟累计 1600（单分钟增量 600）
-    // 今日：第 9 分钟累计 1000，第 10 分钟刚过去 10 秒，按与昨日相同速率成交了 100，此时累计 1100
-    // 若不插值：1100 vs 1600 = -31.25%（严重误判骤缩！）
-    // 线性插值：A_prev_aligned = 1000 + (10/60) * 600 = 1100 → R(10) = 0% (FLAT)
     const prevSeries: MinuteTurnoverPoint[] = [
       { minuteIndex: 9, cumTurnover: 1000 },
       { minuteIndex: 10, cumTurnover: 1600 },
@@ -86,23 +152,19 @@ describe('energyEngine', () => {
     expect(metrics.volumeState).toBe('FLAT');
   });
 
-  it('keeps rolling slope continuous across lunch break (11:28 -> 13:02)', () => {
-    // minuteIndex 117(11:27) .. 122(13:02)，午休 11:30-13:00 完全折叠
-    // 窗口 W=5 在 t=122(13:02) 上取 [118, 119, 120, 121, 122]（11:28, 11:29, 13:00, 13:01, 13:02）
+  it('keeps rolling marginal slope continuous across lunch break (11:28 -> 13:02)', () => {
+    // minuteIndex 113(11:23) .. 122(13:02)，午休 11:30-13:00 完全折叠
+    // 窗口 W=5 在 t=122(13:02) 上取 k ∈ [118, 119, 120, 121, 122]，对应锚点 [113..117]
     const prevSeries: MinuteTurnoverPoint[] = [];
     const todaySeries: MinuteTurnoverPoint[] = [];
-    const ratiosByIndex: Record<number, number> = {
-      117: 0,
-      118: 1.5,
-      119: 3.0,
-      120: 4.5,
-      121: 6.0,
-      122: 7.5,
-    };
+    let prevCum = 10_000;
+    let todayCum = 10_000;
 
-    for (let k = 117; k <= 122; k++) {
-      const prevCum = 10_000 + (k - 117) * 500;
-      const todayCum = prevCum * (1 + ratiosByIndex[k] / 100);
+    for (let k = 113; k <= 122; k++) {
+      prevCum += 500;
+      // k=118..122 每分钟同比递增 +10%, +20%, +30%, +40%, +50%
+      const extra = k >= 118 ? (k - 117) * 50 : 0;
+      todayCum += 500 + extra;
       prevSeries.push({ minuteIndex: k, cumTurnover: prevCum });
       todaySeries.push({ minuteIndex: k, cumTurnover: todayCum });
     }
@@ -114,11 +176,10 @@ describe('energyEngine', () => {
       elapsedSeconds: 60,
     });
 
-    // 连续 5 个点线性递增 +1.5%/min，午休完全折叠，斜率应精确为 +1.5
-    expect(metrics.slope).toBeCloseTo(1.5, 6);
-    // M_5(122) = (today(122) - today(117)) / (prev(122) - prev(117))
-    //          = (12500 * 1.075 - 10000) / (12500 - 10000) = 3437.5 / 2500 = 1.375
-    expect(metrics.windowMultiple).toBeCloseTo(1.375, 6);
+    // D_5(118..122) = [+2%, +6%, +12%, +20%, +30%] → OLS 斜率精确 +7.0%/min
+    expect(metrics.windowMultiple).toBeCloseTo(1.3, 6);
+    expect(metrics.windowDeviationPct).toBeCloseTo(30.0, 6);
+    expect(metrics.slope).toBeCloseTo(7.0, 6);
   });
 
   it('returns unavailable/null without zero-filling when prev baseline is missing, zero, or denominator <= 0', () => {
@@ -135,6 +196,7 @@ describe('energyEngine', () => {
     expect(missingPrev.volumeState).toBe('UNAVAILABLE');
     expect(missingPrev.slope).toBeNull();
     expect(missingPrev.windowMultiple).toBeNull();
+    expect(missingPrev.windowDeviationPct).toBeNull();
 
     // 2. 昨日同期为 0
     const zeroPrev = evaluateEnergy({
@@ -145,7 +207,7 @@ describe('energyEngine', () => {
     expect(zeroPrev.cumRatio).toBeNull();
     expect(zeroPrev.volumeState).toBe('UNAVAILABLE');
 
-    // 3. 昨日区间增量为 0（停牌/无成交），分母 <= 0 → windowMultiple 不可用；无 prevFullDayTurnover → 预测为 null
+    // 3. 昨日区间增量为 0（停牌/无成交），分母 <= 0 → windowMultiple 与边际 slope 均不可用
     const flatPrev = evaluateEnergy({
       todaySeries: [
         { minuteIndex: 5, cumTurnover: 100 },
@@ -168,19 +230,18 @@ describe('energyEngine', () => {
     });
     expect(flatPrev.predictedFullDayTurnover).toBeNull();
     expect(flatPrev.windowMultiple).toBeNull();
-    expect(flatPrev.slope).toBeCloseTo(10, 6);
+    expect(flatPrev.windowDeviationPct).toBeNull();
+    expect(flatPrev.slope).toBeNull();
 
     // 4. OLS 少于 2 点返回 null
     expect(computeOlsSlope([[0, 1]])).toBeNull();
   });
 
   it('handles minuteIndex=0 unclosed interpolation accurately and avoids silent zero-fill when prevAuctionTurnover is missing', () => {
-    // 依据 Phase 0 实测上证指数尺度：昨日 09:25 竞价 127.29 亿，昨日 09:31 累计 513.45 亿
     const prevAuction = 127.29e8;
     const prevM0 = 513.45e8;
     const todayAt10s = prevAuction + (10 / 60) * (prevM0 - prevAuction);
 
-    // 传入昨日竞价基线 → 精确 0% FLAT
     const withAuction = evaluateEnergy({
       todaySeries: [],
       prevSeries: [{ minuteIndex: 0, cumTurnover: prevM0 }],
@@ -193,7 +254,6 @@ describe('energyEngine', () => {
     expect(withAuction.cumRatioPct).toBeCloseTo(0, 6);
     expect(withAuction.volumeState).toBe('FLAT');
 
-    // 缺失昨日竞价基线 → 不得静默按 0 补齐（否则会误判为 +124% 巨幅放量），应返回 UNAVAILABLE
     const missingAuction = evaluateEnergy({
       todaySeries: [],
       prevSeries: [{ minuteIndex: 0, cumTurnover: prevM0 }],
@@ -205,7 +265,6 @@ describe('energyEngine', () => {
     expect(missingAuction.cumRatio).toBeNull();
     expect(missingAuction.volumeState).toBe('UNAVAILABLE');
 
-    // 显式传入 prevAuctionTurnover = 0（如冷门小盘股集合竞价确为 0 成交）→ 允许按 0 插值
     const explicitZeroAuction = evaluateEnergy({
       todaySeries: [],
       prevSeries: [{ minuteIndex: 0, cumTurnover: 600 }],
@@ -217,7 +276,6 @@ describe('energyEngine', () => {
     expect(explicitZeroAuction.prevAlignedCumTurnover).toBeCloseTo(100, 6);
     expect(explicitZeroAuction.volumeState).toBe('FLAT');
 
-    // minuteIndex=0 闭合后（elapsedSeconds=60）无需昨日竞价基线，直接对比完整第 0 分钟累计额
     const closedM0 = evaluateEnergy({
       todaySeries: [{ minuteIndex: 0, cumTurnover: prevM0 }],
       prevSeries: [{ minuteIndex: 0, cumTurnover: prevM0 }],
@@ -228,7 +286,7 @@ describe('energyEngine', () => {
     expect(closedM0.cumRatioPct).toBeCloseTo(0, 6);
   });
 
-  it('guards against NaN elapsedSeconds and matches analytical OLS across W=3, 5, 10', () => {
+  it('guards against NaN elapsedSeconds and matches analytical marginal OLS across W=3, 5, 10', () => {
     const nanElapsed = evaluateEnergy({
       todaySeries: [{ minuteIndex: 10, cumTurnover: 1000 }],
       prevSeries: [
@@ -242,30 +300,33 @@ describe('energyEngine', () => {
     expect(nanElapsed.prevAlignedCumTurnover).toBeNull();
     expect(nanElapsed.volumeState).toBe('UNAVAILABLE');
 
-    // 非线性二次曲线 R(k)% = 0.3k^2 - 1.7k + 2.5，核验 W=3/5/10 的 OLS 与区间倍数
+    // 昨日每分钟匀速 1000，今日第 k 分钟单分钟成交 = 1000 * (1 + 0.02 * k)
+    // 对任意满窗口 W，D_W(k) = 2 * k - (W - 1)（严格线性递增 +2%/min！）
     const prevSeries: MinuteTurnoverPoint[] = [];
     const todaySeries: MinuteTurnoverPoint[] = [];
-    for (let k = 0; k < 20; k++) {
-      const p = 1000 * (k + 1) + k * k * 10;
-      const rPct = 0.3 * k * k - 1.7 * k + 2.5;
-      prevSeries.push({ minuteIndex: k, cumTurnover: p });
-      todaySeries.push({ minuteIndex: k, cumTurnover: p * (1 + rPct / 100) });
+    let pCum = 0;
+    let tCum = 0;
+    for (let k = 0; k < 25; k++) {
+      pCum += 1000;
+      tCum += 1000 * (1 + 0.02 * k);
+      prevSeries.push({ minuteIndex: k, cumTurnover: pCum });
+      todaySeries.push({ minuteIndex: k, cumTurnover: tCum });
     }
 
-    const expectedSlopes: Record<number, number> = { 3: 6.7, 5: 6.1, 10: 4.6 };
     for (const W of [3, 5, 10]) {
       const m = evaluateEnergy({
         todaySeries,
         prevSeries,
-        minuteIndex: 15,
+        minuteIndex: 20,
         elapsedSeconds: 60,
         config: { slopeWindow: W },
       });
-      expect(m.slope).toBeCloseTo(expectedSlopes[W], 6);
       const expectedMult =
-        (todaySeries[15].cumTurnover - todaySeries[15 - W].cumTurnover) /
-        (prevSeries[15].cumTurnover - prevSeries[15 - W].cumTurnover);
+        (todaySeries[20].cumTurnover - todaySeries[20 - W].cumTurnover) /
+        (prevSeries[20].cumTurnover - prevSeries[20 - W].cumTurnover);
       expect(m.windowMultiple).toBeCloseTo(expectedMult, 6);
+      expect(m.windowDeviationPct).toBeCloseTo((expectedMult - 1) * 100, 6);
+      expect(m.slope).toBeCloseTo(2.0, 6);
     }
   });
 });

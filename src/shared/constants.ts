@@ -100,6 +100,10 @@ export const SETTING_ALWAYS_ON_TOP = 'shell.alwaysOnTop';
 export const SETTING_MUTED = 'shell.muted';
 export const SETTING_BOSS_KEY = 'shell.bossKey';
 export const SETTING_AUTO_LAUNCH = 'shell.autoLaunch';
+export const SETTING_MONITOR_CONFIG = 'monitor.config';
+
+/** 可选滚动斜率窗口（分钟） */
+export const ALLOWED_SLOPE_WINDOWS = [3, 5, 10] as const;
 
 /** 桌面外壳默认参数 */
 export const DEFAULT_HUD_OPACITY = 0.9;
@@ -108,12 +112,12 @@ export const MAX_HUD_OPACITY = 1.0;
 export const DEFAULT_BOSS_KEY = 'Alt+Shift+A';
 
 /** 双态窗口默认尺寸（像素） */
-export const HUD_DEFAULT_WIDTH = 376;
-export const HUD_DEFAULT_HEIGHT = 388;
-export const DETAIL_DEFAULT_WIDTH = 860;
-export const DETAIL_DEFAULT_HEIGHT = 580;
-export const DETAIL_MIN_WIDTH = 720;
-export const DETAIL_MIN_HEIGHT = 480;
+export const HUD_DEFAULT_WIDTH = 400;
+export const HUD_DEFAULT_HEIGHT = 456;
+export const DETAIL_DEFAULT_WIDTH = 960;
+export const DETAIL_DEFAULT_HEIGHT = 640;
+export const DETAIL_MIN_WIDTH = 780;
+export const DETAIL_MIN_HEIGHT = 520;
 
 /** 开发态模拟测试告警的统一标记前缀（严禁伪装成实盘告警） */
 export const SIMULATED_ALERT_PREFIX = '[模拟测试]';

@@ -1,5 +1,50 @@
 import type { MarketPhaseType, VolumeStateType } from '../../../shared/types';
-export { resolveSymbolChangePct, resolveSymbolTurnover } from '../../../shared/snapshotView';
+export {
+  resolveSymbolChangePct,
+  resolveSymbolPrice,
+  resolveSymbolTurnover,
+} from '../../../shared/snapshotView';
+
+export function formatPrice(price: number | null | undefined): string {
+  if (price === null || price === undefined || !Number.isFinite(price) || price <= 0) {
+    return '—';
+  }
+  return price >= 1000 ? price.toFixed(1) : price.toFixed(2);
+}
+
+export function formatSlopeTrend(
+  slope: number | null | undefined,
+  windowMultiple: number | null | undefined,
+  surgeSlopeThreshold = 3.0,
+  shrinkSlopeThreshold = -3.0
+): {
+  arrow: string;
+  label: string;
+  tone: 'surge' | 'shrink' | 'up' | 'down' | 'flat';
+} {
+  if (slope === null || slope === undefined || !Number.isFinite(slope)) {
+    return { arrow: '·', label: '斜率待计算', tone: 'flat' };
+  }
+  const slopeStr = `${slope >= 0 ? '+' : ''}${slope.toFixed(2)}%/分`;
+  const multStr =
+    windowMultiple !== null && windowMultiple !== undefined && Number.isFinite(windowMultiple)
+      ? ` · ${windowMultiple.toFixed(2)}x`
+      : '';
+
+  if (slope >= surgeSlopeThreshold) {
+    return { arrow: '▲', label: `急放 ${slopeStr}${multStr}`, tone: 'surge' };
+  }
+  if (slope <= shrinkSlopeThreshold) {
+    return { arrow: '▼', label: `急缩 ${slopeStr}${multStr}`, tone: 'shrink' };
+  }
+  if (slope >= 0.8) {
+    return { arrow: '↗', label: `${slopeStr}${multStr}`, tone: 'up' };
+  }
+  if (slope <= -0.8) {
+    return { arrow: '↘', label: `${slopeStr}${multStr}`, tone: 'down' };
+  }
+  return { arrow: '→', label: `${slopeStr}${multStr}`, tone: 'flat' };
+}
 
 export function formatTurnover(amountYuan: number | null | undefined): string {
   if (amountYuan === null || amountYuan === undefined || !Number.isFinite(amountYuan)) {

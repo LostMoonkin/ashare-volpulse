@@ -5,16 +5,20 @@ import type {
   AlertDispatchPayload,
   DesktopShellState,
   MarketDashboardState,
+  MonitorConfig,
 } from '../../../shared/types';
 import { playAlertSound } from '../audio/alertSound';
 import {
   formatClockTime,
   formatPhaseLabel,
+  formatPrice,
   formatSignedPct,
   formatSignedTurnover,
+  formatSlopeTrend,
   formatTurnover,
   formatVolumeState,
   resolveSymbolChangePct,
+  resolveSymbolPrice,
   resolveSymbolTurnover,
 } from '../utils/format';
 
@@ -23,11 +27,14 @@ const PULSE_DURATION_MS = 6000;
 export function HudView() {
   const [market, setMarket] = useState<MarketDashboardState | null>(null);
   const [shell, setShell] = useState<DesktopShellState | null>(null);
+  const [monitorConfig, setMonitorConfig] = useState<MonitorConfig | null>(null);
   const [activeAlert, setActiveAlert] = useState<AlertDispatchPayload | null>(null);
+  const [watchlistExpanded, setWatchlistExpanded] = useState<boolean>(true);
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     void window.api.getShellState().then(setShell).catch(() => {});
+    void window.api.getMonitorConfig().then(setMonitorConfig).catch(() => {});
     void window.api
       .getMarketState()
       .then((initial) => {
@@ -40,6 +47,9 @@ export function HudView() {
     });
     const unsubShell = window.api.onShellStateUpdated((next) => {
       setShell(next);
+    });
+    const unsubMonitor = window.api.onMonitorConfigUpdated((next) => {
+      setMonitorConfig(next);
     });
     const unsubAlert = window.api.onAlertTriggered((payload) => {
       setActiveAlert(payload);
@@ -58,6 +68,7 @@ export function HudView() {
     return () => {
       unsubMarket();
       unsubShell();
+      unsubMonitor();
       unsubAlert();
       if (pulseTimerRef.current) {
         clearTimeout(pulseTimerRef.current);
@@ -69,6 +80,12 @@ export function HudView() {
   const status = market?.status ?? null;
   const isDegraded = Boolean(status?.degraded || status?.stale || total?.degraded);
   const volBadge = formatVolumeState(total?.metrics?.volumeState);
+  const slopeTrend = formatSlopeTrend(
+    total?.metrics?.slope,
+    total?.metrics?.windowMultiple,
+    monitorConfig?.surgeSlopeThreshold ?? 3.0,
+    monitorConfig?.shrinkSlopeThreshold ?? -3.0
+  );
   const opacityPct = Math.round((shell?.settings.hudOpacity ?? 0.9) * 100);
 
   const pulseClass = activeAlert
@@ -89,6 +106,8 @@ export function HudView() {
     void window.api.simulateAlert(direction, MARKET_TOTAL_SYMBOL).catch(() => {});
   };
 
+  const watchlistItems = market?.watchlist ?? [];
+
   return (
     <div className="hud-viewport">
       <section className={`hud-shell ${pulseClass}`}>
@@ -98,6 +117,7 @@ export function HudView() {
             <span className={`status-dot ${statusDotClass}`} />
             <span>A 股能量看板</span>
             <span className="badge badge-muted">{formatPhaseLabel(status?.phase)}</span>
+            {status?.mode === 'REPLAY' && <span className="badge badge-flat">复盘</span>}
           </div>
 
           <div className="hud-actions no-drag">
@@ -136,122 +156,192 @@ export function HudView() {
           </div>
         </header>
 
-        {/* 中间内容区：独立承载横幅与行情卡片，保证极端双横幅同时出现也不裁切底部状态栏 */}
-        <div className="hud-content no-drag">
-          {/* 老板键冲突提示 */}
-          {shell?.bossKeyStatus.conflictMessage && (
-            <div
-              className="hud-conflict-banner"
-              role="alert"
-              onClick={() => void window.api.openDetail({ tab: 'settings' })}
-              title="点击前往设置改绑老板键"
-            >
-              ⚠ {shell.bossKeyStatus.conflictMessage}
-            </div>
-          )}
-
-          {/* 核心 Hero 区：沪深两市总成交额 */}
+        {/* 老板键冲突提示 */}
+        {shell?.bossKeyStatus.conflictMessage && (
           <div
-            className="hud-hero"
-            onClick={() => void window.api.openDetail({ symbol: MARKET_TOTAL_SYMBOL, tab: 'chart' })}
-            title="点击展开详情浮层"
+            className="hud-conflict-banner no-drag"
+            role="alert"
+            onClick={() => void window.api.openDetail({ tab: 'settings' })}
+            title="点击前往设置改绑老板键"
           >
-            <div className="hud-hero-top">
-              <span className="hud-hero-label">沪深两市总成交额（沪+深，不含北证）</span>
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {isDegraded && (
-                  <span className="badge badge-warn">{status?.stale ? '陈旧' : '降级'}</span>
-                )}
-                <span className={`badge badge-${volBadge.tone}`}>{volBadge.label}</span>
-              </div>
-            </div>
+            ⚠ {shell.bossKeyStatus.conflictMessage}
+          </div>
+        )}
 
-            <div className="hud-hero-value">
-              <span className="hud-total-amount">
-                {total && total.cumTurnover !== null ? formatTurnover(total.cumTurnover) : '暂不可用'}
-              </span>
-              <span
-                className={
-                  total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
-                    ? total.metrics.cumRatioPct > 0
-                      ? 'tone-up'
-                      : total.metrics.cumRatioPct < 0
-                        ? 'tone-down'
-                        : ''
-                    : ''
-                }
-                style={{ fontSize: '13px', fontWeight: 600 }}
-              >
-                {formatSignedPct(total?.metrics?.cumRatioPct, 1)}
-              </span>
-            </div>
-
-            <div className="hud-hero-sub">
-              <span>较昨同期 {formatSignedTurnover(total?.metrics?.cumDiff)}</span>
-              <span>预测全天 {formatTurnover(total?.metrics?.predictedFullDayTurnover)}</span>
+        {/* 核心 Hero 区：沪深两市总成交额 + 同比 + 预测全天 + 趋势斜率脉冲 */}
+        <div
+          className="hud-hero no-drag"
+          onClick={() => void window.api.openDetail({ symbol: MARKET_TOTAL_SYMBOL, tab: 'chart' })}
+          title="点击展开两市分时能量对比图"
+        >
+          <div className="hud-hero-top">
+            <span className="hud-hero-label">沪深两市总成交额（沪+深，不含北证）</span>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {isDegraded && (
+                <span className="badge badge-warn">{status?.stale ? '陈旧' : '降级'}</span>
+              )}
+              <span className={`badge badge-${volBadge.tone}`}>{volBadge.label}</span>
             </div>
           </div>
 
-          {/* 四大核心指数精简卡片（点击直接打开该标的详情浮层） */}
-          <div className="hud-indices">
+          <div className="hud-hero-value">
+            <span className="hud-total-amount">
+              {total && total.cumTurnover !== null ? formatTurnover(total.cumTurnover) : '降级/无数据'}
+            </span>
+            <span
+              className={
+                total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
+                  ? total.metrics.cumRatioPct >= 0
+                    ? 'tone-up'
+                    : 'tone-down'
+                  : ''
+              }
+              style={{ fontSize: '12px', fontWeight: 600 }}
+            >
+              {total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
+                ? `${formatSignedPct(total.metrics.cumRatioPct, 1)} / ${formatSignedTurnover(total.metrics.cumDiff)}`
+                : '同比待比对'}
+            </span>
+          </div>
+
+          <div className="hud-hero-sub">
+            <span>预测全天 {formatTurnover(total?.metrics?.predictedFullDayTurnover)}</span>
+            <span className={`slope-chip slope-${slopeTrend.tone}`}>
+              <span className="slope-arrow">{slopeTrend.arrow}</span>
+              <span>{slopeTrend.label}</span>
+            </span>
+          </div>
+        </div>
+
+        {/* 四大核心指数精简行：点位、涨跌幅、成交额、口径角标、放缩量徽章 */}
+        <div className="hud-list-section no-drag">
+          <div className="hud-index-list">
             {(market?.indices ?? []).slice(0, 4).map((item) => {
+              const price = resolveSymbolPrice(item);
               const pct = resolveSymbolChangePct(item);
               const turnover = resolveSymbolTurnover(item);
+              const badge = formatVolumeState(item.metrics?.volumeState);
               const toneClass =
-                pct === undefined || pct === null
-                  ? ''
-                  : pct > 0
-                    ? 'tone-up'
-                    : pct < 0
-                      ? 'tone-down'
-                      : '';
+                pct === null ? '' : pct >= 0 ? 'tone-up' : 'tone-down';
               return (
                 <div
                   key={item.symbol}
-                  className="hud-index-card"
+                  className="hud-quote-row"
                   onClick={() => void window.api.openDetail({ symbol: item.symbol, tab: 'chart' })}
-                  title={`点击查看 ${item.name} 详情`}
+                  title={`点击查看 ${item.name} 分时对比图`}
                 >
-                  <div className="hud-index-row">
-                    <span style={{ fontWeight: 600 }}>{item.name}</span>
+                  <div className="hud-quote-name">
+                    <span className="quote-title">{item.name}</span>
                     {item.scope && <span className="scope-tag">{item.scope}</span>}
                   </div>
-                  <div className="hud-index-row">
-                    <span className={toneClass}>{formatSignedPct(pct, 2)}</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>
-                      {turnover !== null ? formatTurnover(turnover) : '降级'}
-                    </span>
-                  </div>
+                  <span className="hud-quote-price">{formatPrice(price)}</span>
+                  <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
+                  <span className="hud-quote-turn">
+                    {turnover !== null ? formatTurnover(turnover) : '降级'}
+                  </span>
+                  <span className={`badge badge-compact badge-${item.degraded && turnover === null ? 'warn' : badge.tone}`}>
+                    {item.degraded && turnover === null ? '降级' : badge.label}
+                  </span>
                 </div>
               );
             })}
           </div>
+        </div>
 
-          {/* 呼吸告警即时横幅 */}
-          {activeAlert && (
-            <div
-              className={`hud-alert-banner ${activeAlert.direction === 'SURGE' ? 'surge' : 'shrink'}`}
-              onClick={() =>
-                void window.api.openDetail({ symbol: activeAlert.symbol, tab: 'alerts' })
-              }
-              title="点击查看异动事件流"
+        {/* 自选股精简列表（可滚动 / 可折叠） */}
+        <div className="hud-watchlist-section no-drag">
+          <div className="hud-section-bar">
+            <button
+              type="button"
+              className="section-toggle-btn"
+              onClick={() => setWatchlistExpanded((v) => !v)}
             >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {activeAlert.isSimulated ? '[模拟测试] ' : ''}
-                {activeAlert.name} · {activeAlert.direction === 'SURGE' ? '急放' : '急缩'} (
-                {formatSignedPct(activeAlert.slope, 2)}/分 · {activeAlert.windowMultiple.toFixed(2)}x)
-              </span>
-              {activeAlert.muted && <span className="badge badge-warn">静音</span>}
+              <span>{watchlistExpanded ? '▾' : '▸'} 自选股 ({watchlistItems.length})</span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              title="管理自选股（添加/删除/排序/单股阈值）"
+              onClick={() => void window.api.openDetail({ tab: 'watchlist' })}
+            >
+              + 管理
+            </button>
+          </div>
+
+          {watchlistExpanded && (
+            <div className="hud-watchlist-scroll">
+              {watchlistItems.length === 0 ? (
+                <div
+                  className="hud-watchlist-empty"
+                  onClick={() => void window.api.openDetail({ tab: 'watchlist' })}
+                >
+                  暂无自选股，点击「+ 管理」搜索添加
+                </div>
+              ) : (
+                watchlistItems.map((item) => {
+                  const price = resolveSymbolPrice(item);
+                  const pct = resolveSymbolChangePct(item);
+                  const turnover = resolveSymbolTurnover(item);
+                  const badge = formatVolumeState(item.metrics?.volumeState);
+                  const toneClass = pct === null ? '' : pct >= 0 ? 'tone-up' : 'tone-down';
+                  return (
+                    <div
+                      key={item.symbol}
+                      className="hud-quote-row"
+                      onClick={() => void window.api.openDetail({ symbol: item.symbol, tab: 'chart' })}
+                      title={`点击查看 ${item.name} (${item.symbol}) 分时能量图`}
+                    >
+                      <div className="hud-quote-name">
+                        <span className="quote-title">{item.name}</span>
+                        <span className="quote-code">{item.symbol.slice(0, 6)}</span>
+                      </div>
+                      <span className="hud-quote-price">{formatPrice(price)}</span>
+                      <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
+                      <span className="hud-quote-turn">
+                        {turnover !== null ? formatTurnover(turnover) : '降级'}
+                      </span>
+                      <span
+                        className={`badge badge-compact badge-${item.degraded && turnover === null ? 'warn' : badge.tone}`}
+                      >
+                        {item.degraded && turnover === null ? '降级' : badge.label}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
         </div>
 
-        {/* 底部极简状态条 + 透明度滑块 + 开发态模拟测试入口 */}
+        {/* 呼吸告警即时横幅 */}
+        {activeAlert && (
+          <div
+            className={`hud-alert-banner no-drag ${activeAlert.direction === 'SURGE' ? 'surge' : 'shrink'}`}
+            onClick={() =>
+              void window.api.openDetail({ symbol: activeAlert.symbol, tab: 'alerts' })
+            }
+            title="点击查看异动事件流"
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {activeAlert.isSimulated ? '[模拟测试] ' : ''}
+              {activeAlert.name} · {activeAlert.direction === 'SURGE' ? '急放' : '急缩'} (
+              {formatSignedPct(activeAlert.slope, 2)}/分 · {activeAlert.windowMultiple.toFixed(2)}x)
+            </span>
+            {activeAlert.muted && <span className="badge badge-warn">静音</span>}
+          </div>
+        )}
+
+        {/* 底部极简状态条：数据源、更新时间、延迟/降级提示、透明度滑块、快捷操作 */}
         <footer className="hud-footer no-drag">
           <div className="hud-footer-row">
-            <span>
-              源：{status?.activeSnapshotProvider ?? status?.activeIntradayProvider ?? '—'} · 更新{' '}
+            <span className="hud-status-text">
+              源：{status?.activeSnapshotProvider ?? status?.activeIntradayProvider ?? '—'}
+              {status?.lastLatencyMs !== null && status?.lastLatencyMs !== undefined
+                ? ` (${Math.round(status.lastLatencyMs)}ms)`
+                : ''}
+              {' · '}
               {formatClockTime(status?.lastUpdatedAt)}
+              {isDegraded ? ' · 降级' : ''}
             </span>
             <label className="opacity-control" title={`透明度 ${opacityPct}%`}>
               <span>透 {opacityPct}%</span>
@@ -276,6 +366,13 @@ export function HudView() {
                 onClick={() => void window.api.refreshMarketNow()}
               >
                 刷新
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => void window.api.openDetail({ tab: 'settings' })}
+              >
+                设置
               </button>
               {shell?.isDev && (
                 <>

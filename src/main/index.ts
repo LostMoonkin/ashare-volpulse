@@ -16,7 +16,11 @@ import type {
   DesktopShellSettings,
   DesktopShellState,
   MarketDashboardState,
+  MonitorConfig,
   OpenDetailOptions,
+  ProviderHealthStatus,
+  WatchlistAddInput,
+  WatchlistUpdateInput,
 } from '../shared/types';
 import { AlertDispatcher } from './alerts';
 import {
@@ -27,7 +31,9 @@ import {
 } from './providers';
 import { PollingScheduler } from './scheduler';
 import { AppDatabase } from './storage/database';
+import { MonitorSettingsStore } from './storage/monitorSettingsStore';
 import { SecretStore } from './storage/secretStore';
+import { WatchlistService } from './storage/watchlistService';
 import { BossKeyManager, TrayManager } from './tray';
 import {
   ShellSettingsStore,
@@ -39,8 +45,6 @@ import {
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
-// 允许无用户点击手势前在常驻 HUD 播放 Web Audio 告警提示音
-app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 const isDevMode = !app.isPackaged;
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -48,6 +52,9 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 let database: AppDatabase | null = null;
 let secretStore: SecretStore | null = null;
 let settingsStore: ShellSettingsStore | null = null;
+let monitorSettingsStore: MonitorSettingsStore | null = null;
+let watchlistService: WatchlistService | null = null;
+let hithinkProvider: HithinkProvider | null = null;
 let shellSettings: DesktopShellSettings | null = null;
 let windowManager: WindowManager | null = null;
 let trayManager: TrayManager | null = null;
@@ -87,10 +94,8 @@ function handleAlertTriggered(event: AlertEventInput): void {
   alertDispatcher?.dispatch(event);
 }
 
-function applyAutoLaunchSetting(enabled: boolean): boolean {
-  if (process.platform !== 'win32' && process.platform !== 'darwin') {
-    return false;
-  }
+function applyAutoLaunchSetting(enabled: boolean): void {
+  if (process.platform !== 'win32' && process.platform !== 'darwin') return;
   try {
     if (app.isPackaged) {
       app.setLoginItemSettings({ openAtLogin: enabled });
@@ -101,17 +106,42 @@ function applyAutoLaunchSetting(enabled: boolean): boolean {
         path: process.execPath,
         args: [appArg],
       });
-    } else {
-      app.setLoginItemSettings({ openAtLogin: enabled });
     }
-    return true;
   } catch (err: unknown) {
     console.warn(
       '[main] setLoginItemSettings failed:',
       err instanceof Error ? err.message : String(err)
     );
-    return false;
   }
+}
+
+function applyMonitorConfigToScheduler(config: MonitorConfig): void {
+  if (!scheduler) return;
+  scheduler.updatePollingInterval(config.pollingIntervalSec);
+  scheduler.updateEnergyConfig({
+    expandThresholdPct: config.expandThresholdPct,
+    shrinkThresholdPct: config.shrinkThresholdPct,
+    slopeWindow: config.slopeWindow,
+  });
+  scheduler.updateAlertConfig({
+    enabled: config.alertsEnabled,
+    surgeSlopeThreshold: config.surgeSlopeThreshold,
+    surgeMultipleThreshold: config.surgeMultipleThreshold,
+    shrinkSlopeThreshold: config.shrinkSlopeThreshold,
+    shrinkMultipleThreshold: config.shrinkMultipleThreshold,
+    matchMode: config.matchMode,
+    cooldownMinutes: config.cooldownMinutes,
+    slopeWindow: config.slopeWindow,
+  });
+}
+
+function sanitizeErrorText(text: string | null): string | null {
+  if (!text) return null;
+  const activeKey = secretStore?.getApiKey();
+  if (activeKey && text.includes(activeKey)) {
+    return text.split(activeKey).join('***');
+  }
+  return text;
 }
 
 function updateAlwaysOnTop(alwaysOnTop: boolean): DesktopShellState {
@@ -147,11 +177,9 @@ function updateAutoLaunch(enabled: boolean): DesktopShellState {
   if (!settingsStore || !shellSettings) {
     throw new Error('Desktop shell is not ready.');
   }
-  const applied = applyAutoLaunchSetting(Boolean(enabled));
-  if (applied) {
-    const normalized = settingsStore.setAutoLaunch(enabled);
-    shellSettings = { ...shellSettings, autoLaunch: normalized };
-  }
+  const normalized = settingsStore.setAutoLaunch(enabled);
+  shellSettings = { ...shellSettings, autoLaunch: normalized };
+  applyAutoLaunchSetting(normalized);
   return syncShellState();
 }
 
@@ -175,11 +203,50 @@ function registerIpcHandlers(): void {
     };
   });
 
+  ipcMain.handle(IPC_CHANNELS.DB_GET_RETENTION_STATS, () => {
+    if (!database) {
+      throw new Error('Database is not initialized.');
+    }
+    return database.getRetentionStats();
+  });
+
   ipcMain.handle(IPC_CHANNELS.SECRET_GET_STATUS, () => {
     if (!secretStore) {
       throw new Error('SecretStore is not initialized.');
     }
     return secretStore.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SECRET_SAVE_KEY, (_event, apiKey: string) => {
+    if (!secretStore) {
+      throw new Error('SecretStore is not initialized.');
+    }
+    secretStore.setStoredApiKey(apiKey);
+    return secretStore.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SECRET_CLEAR_KEY, () => {
+    if (!secretStore) {
+      throw new Error('SecretStore is not initialized.');
+    }
+    secretStore.clearStoredApiKey();
+    return secretStore.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SECRET_TEST_CONNECTION, async (): Promise<ProviderHealthStatus> => {
+    if (!hithinkProvider) {
+      return {
+        provider: 'hithink',
+        ok: false,
+        latencyMs: 0,
+        error: 'HithinkProvider is not initialized.',
+      };
+    }
+    const result = await hithinkProvider.healthCheck();
+    return {
+      ...result,
+      error: sanitizeErrorText(result.error),
+    };
   });
 
   ipcMain.handle(IPC_CHANNELS.MARKET_GET_STATE, () => {
@@ -198,6 +265,69 @@ function registerIpcHandlers(): void {
       return scheduler.searchTickers(keyword, limit);
     }
   );
+
+  ipcMain.handle(IPC_CHANNELS.MONITOR_GET_CONFIG, (): MonitorConfig => {
+    if (!monitorSettingsStore) {
+      throw new Error('MonitorSettingsStore is not initialized.');
+    }
+    return monitorSettingsStore.load();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MONITOR_UPDATE_CONFIG,
+    async (_event, patch: Partial<MonitorConfig>): Promise<MonitorConfig> => {
+      if (!monitorSettingsStore) {
+        throw new Error('MonitorSettingsStore is not initialized.');
+      }
+      const next = monitorSettingsStore.update(patch);
+      applyMonitorConfigToScheduler(next);
+      windowManager?.broadcast(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, next);
+      // 触发即时重算与广播，使阈值/斜率窗口/刷新周期改动无需重启即刻生效
+      void scheduler?.refreshNow().catch(() => {});
+      return next;
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.WATCHLIST_GET_ALL, () => {
+    if (!watchlistService) return [];
+    return watchlistService.list();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WATCHLIST_ADD, (_event, input: WatchlistAddInput) => {
+    if (!watchlistService) {
+      throw new Error('WatchlistService is not initialized.');
+    }
+    const list = watchlistService.add(input);
+    void scheduler?.refreshNow().catch(() => {});
+    return list;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WATCHLIST_REMOVE, (_event, symbol: string) => {
+    if (!watchlistService) {
+      throw new Error('WatchlistService is not initialized.');
+    }
+    const list = watchlistService.remove(symbol);
+    void scheduler?.refreshNow().catch(() => {});
+    return list;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WATCHLIST_REORDER, (_event, symbols: string[]) => {
+    if (!watchlistService) {
+      throw new Error('WatchlistService is not initialized.');
+    }
+    const list = watchlistService.reorder(symbols);
+    void scheduler?.refreshNow().catch(() => {});
+    return list;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WATCHLIST_UPDATE, (_event, input: WatchlistUpdateInput) => {
+    if (!watchlistService) {
+      throw new Error('WatchlistService is not initialized.');
+    }
+    const list = watchlistService.update(input);
+    void scheduler?.refreshNow().catch(() => {});
+    return list;
+  });
 
   ipcMain.handle(IPC_CHANNELS.SHELL_GET_STATE, (): DesktopShellState => {
     return buildShellState();
@@ -277,13 +407,8 @@ function registerIpcHandlers(): void {
       if (direction !== 'SURGE' && direction !== 'SHRINK') {
         throw new Error(`Invalid alert direction: ${String(direction)}`);
       }
-      const targetSymbol = symbol?.trim() || MARKET_TOTAL_SYMBOL;
-      const watchlistName = database
-        ?.getWatchlist()
-        .find((item) => item.symbol.toUpperCase() === targetSymbol.toUpperCase())?.name;
       return alertDispatcher.dispatchSimulated(direction, {
-        symbol: targetSymbol,
-        name: watchlistName,
+        symbol: symbol ?? MARKET_TOTAL_SYMBOL,
       });
     }
   );
@@ -305,6 +430,11 @@ function initServices(): void {
 
   settingsStore = new ShellSettingsStore(database);
   shellSettings = settingsStore.load();
+
+  monitorSettingsStore = new MonitorSettingsStore(database);
+  const initialMonitorConfig = monitorSettingsStore.load();
+
+  watchlistService = new WatchlistService(database);
 
   windowManager = new WindowManager({
     preloadPath: resolvePreloadPath(__dirname),
@@ -384,7 +514,7 @@ function initServices(): void {
   const tencentProvider = new TencentProvider();
   const sinaProvider = new SinaProvider();
   const eastmoneyProvider = new EastmoneyProvider();
-  const hithinkProvider = new HithinkProvider({ secretStore });
+  hithinkProvider = new HithinkProvider({ secretStore });
 
   scheduler = new PollingScheduler({
     database,
@@ -393,6 +523,22 @@ function initServices(): void {
     hithinkProvider,
     primaryIntradayProvider: tencentProvider,
     secondaryIntradayProvider: eastmoneyProvider,
+    configuredIntervalSec: initialMonitorConfig.pollingIntervalSec,
+    energyConfig: {
+      expandThresholdPct: initialMonitorConfig.expandThresholdPct,
+      shrinkThresholdPct: initialMonitorConfig.shrinkThresholdPct,
+      slopeWindow: initialMonitorConfig.slopeWindow,
+    },
+    alertConfig: {
+      enabled: initialMonitorConfig.alertsEnabled,
+      surgeSlopeThreshold: initialMonitorConfig.surgeSlopeThreshold,
+      surgeMultipleThreshold: initialMonitorConfig.surgeMultipleThreshold,
+      shrinkSlopeThreshold: initialMonitorConfig.shrinkSlopeThreshold,
+      shrinkMultipleThreshold: initialMonitorConfig.shrinkMultipleThreshold,
+      matchMode: initialMonitorConfig.matchMode,
+      cooldownMinutes: initialMonitorConfig.cooldownMinutes,
+      slopeWindow: initialMonitorConfig.slopeWindow,
+    },
     onStateUpdate: broadcastMarketState,
     onAlertTriggered: handleAlertTriggered,
   });
@@ -447,6 +593,7 @@ if (!singleInstanceLock) {
     trayManager = null;
     scheduler?.stop();
     scheduler = null;
+    hithinkProvider = null;
     windowManager?.destroyAll();
     windowManager = null;
     database?.close();

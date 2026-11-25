@@ -5,16 +5,38 @@ import type {
   AlertDispatchPayload,
   DesktopShellState,
   MarketDashboardState,
+  MonitorConfig,
   OpenDetailOptions,
+  WatchlistAddInput,
+  WatchlistUpdateInput,
 } from '../shared/types';
 
 const api: PreloadApi = {
   getBootstrapState: () => ipcRenderer.invoke(IPC_CHANNELS.APP_GET_BOOTSTRAP_STATE),
   getSecretStatus: () => ipcRenderer.invoke(IPC_CHANNELS.SECRET_GET_STATUS),
+  saveSecretApiKey: (apiKey: string) => ipcRenderer.invoke(IPC_CHANNELS.SECRET_SAVE_KEY, apiKey),
+  clearSecretApiKey: () => ipcRenderer.invoke(IPC_CHANNELS.SECRET_CLEAR_KEY),
+  testHithinkConnection: () => ipcRenderer.invoke(IPC_CHANNELS.SECRET_TEST_CONNECTION),
+  getDatabaseRetentionStats: () => ipcRenderer.invoke(IPC_CHANNELS.DB_GET_RETENTION_STATS),
+
   getMarketState: () => ipcRenderer.invoke(IPC_CHANNELS.MARKET_GET_STATE),
   refreshMarketNow: () => ipcRenderer.invoke(IPC_CHANNELS.MARKET_REFRESH_NOW),
   searchTickers: (keyword: string, limit?: number) =>
     ipcRenderer.invoke(IPC_CHANNELS.TICKER_SEARCH, keyword, limit),
+
+  getMonitorConfig: () => ipcRenderer.invoke(IPC_CHANNELS.MONITOR_GET_CONFIG),
+  updateMonitorConfig: (patch: Partial<MonitorConfig>) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MONITOR_UPDATE_CONFIG, patch),
+
+  getWatchlist: () => ipcRenderer.invoke(IPC_CHANNELS.WATCHLIST_GET_ALL),
+  addWatchlistItem: (input: WatchlistAddInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WATCHLIST_ADD, input),
+  removeWatchlistItem: (symbol: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WATCHLIST_REMOVE, symbol),
+  reorderWatchlist: (symbols: string[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WATCHLIST_REORDER, symbols),
+  updateWatchlistItem: (input: WatchlistUpdateInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WATCHLIST_UPDATE, input),
 
   getShellState: () => ipcRenderer.invoke(IPC_CHANNELS.SHELL_GET_STATE),
   openDetail: (options?: OpenDetailOptions) =>
@@ -62,6 +84,16 @@ const api: PreloadApi = {
     ipcRenderer.on(IPC_CHANNELS.SHELL_STATE_UPDATED, handler);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.SHELL_STATE_UPDATED, handler);
+    };
+  },
+
+  onMonitorConfigUpdated: (listener: (config: MonitorConfig) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, config: MonitorConfig) => {
+      listener(config);
+    };
+    ipcRenderer.on(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, handler);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, handler);
     };
   },
 };

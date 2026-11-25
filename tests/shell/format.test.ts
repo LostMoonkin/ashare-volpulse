@@ -55,6 +55,7 @@ describe('renderer format helpers (REPLAY & LIVE fallback)', () => {
         volumeState: 'FLAT',
         slope: -0.03,
         windowMultiple: 0.95,
+        windowDeviationPct: -5,
         slopeWindow: 5,
       },
     });
