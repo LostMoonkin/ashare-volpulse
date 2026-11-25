@@ -248,13 +248,58 @@ export class AppDatabase {
     return rows.map((r) => r.trade_date);
   }
 
-  /** 查询早于指定交易日的最近 limit 个已录制交易日（降序，用于多日分时预测模板） */
+  /** 查询早于指定交易日的最近 limit 个已录制交易日（降序） */
   getRecentRecordedBarDatesBefore(beforeDate: string, limit = 10): string[] {
     const rows = this.db
       .prepare(
         'SELECT DISTINCT trade_date FROM intraday_bars WHERE trade_date < ? ORDER BY trade_date DESC LIMIT ?'
       )
       .all(beforeDate, limit) as Array<{ trade_date: string }>;
+    return rows.map((r) => r.trade_date);
+  }
+
+  /** 按指定标的查询早于 beforeDate 的最近 limit 个完整 240 分钟历史交易日（降序，防残缺日/他股挤占样本名额） */
+  getRecentCompleteBarDatesForSymbol(symbol: string, beforeDate: string, limit = 10): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT trade_date
+         FROM intraday_bars
+         WHERE symbol = ? AND trade_date < ?
+         GROUP BY trade_date
+         HAVING COUNT(*) >= 240
+         ORDER BY trade_date DESC
+         LIMIT ?`
+      )
+      .all(symbol, beforeDate, limit) as Array<{ trade_date: string }>;
+    return rows.map((r) => r.trade_date);
+  }
+
+  /** 查询沪深两市成分标的（shSymbol 与 szSymbol）同时具备完整 240 分钟的历史交易日（降序） */
+  getRecentCompletePairBarDates(
+    shSymbol: string,
+    szSymbol: string,
+    beforeDate: string,
+    limit = 10
+  ): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT a.trade_date
+         FROM (
+           SELECT trade_date FROM intraday_bars
+           WHERE symbol = ? AND trade_date < ?
+           GROUP BY trade_date
+           HAVING COUNT(*) >= 240
+         ) a
+         INNER JOIN (
+           SELECT trade_date FROM intraday_bars
+           WHERE symbol = ? AND trade_date < ?
+           GROUP BY trade_date
+           HAVING COUNT(*) >= 240
+         ) b ON a.trade_date = b.trade_date
+         ORDER BY a.trade_date DESC
+         LIMIT ?`
+      )
+      .all(shSymbol, beforeDate, szSymbol, beforeDate, limit) as Array<{ trade_date: string }>;
     return rows.map((r) => r.trade_date);
   }
 

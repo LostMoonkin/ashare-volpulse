@@ -422,4 +422,60 @@ describe('energyEngine', () => {
       expect(m.slope).toBeCloseTo(2.0, 6);
     }
   });
+
+  it('rejects partial historical days in buildPredictionProfile and falls back to single-day Bayesian prediction when profile cannot align', () => {
+    // 1. 仅有收盘末根（minuteIndex=239）或仅午盘 120 根的残缺日必须被过滤，不得产出残缺模板
+    expect(
+      buildPredictionProfile([{ bars: [{ minuteIndex: 239, cumTurnover: 100_000 }], auctionTurnover: null }])
+    ).toBeNull();
+    expect(
+      buildPredictionProfile([
+        {
+          bars: Array.from({ length: 120 }, (_, i) => ({
+            minuteIndex: 120 + i,
+            cumTurnover: (i + 1) * 1000,
+          })),
+          auctionTurnover: null,
+        },
+      ])
+    ).toBeNull();
+
+    // 2. 仅部分样本日具备竞价快照时，avgAuctionShare 不得抬高真实 m=0 平均占比
+    const makeDay = (m0Share: number, full: number): MinuteTurnoverPoint[] => {
+      const m0 = full * m0Share;
+      const step = (full - m0) / 239;
+      return Array.from({ length: 240 }, (_, m) => ({
+        minuteIndex: m,
+        cumTurnover: m === 0 ? m0 : m0 + step * m,
+      }));
+    };
+    const mixedAuctionProfile = buildPredictionProfile([
+      { bars: makeDay(0.12, 100_000), auctionTurnover: 10_000 }, // auction=10%, m0=12%
+      { bars: makeDay(0.06, 100_000), auctionTurnover: null }, // 无竞价，m0=6% → 2日均值 m0=9%
+    ]);
+    expect(mixedAuctionProfile).not.toBeNull();
+    expect(mixedAuctionProfile!.minuteShares.get(0)).toBeCloseTo(0.09, 6);
+    expect(mixedAuctionProfile!.avgAuctionShare).toBeLessThanOrEqual(
+      mixedAuctionProfile!.minuteShares.get(0)!
+    );
+
+    // 3. 当多日模板缺少竞价占比（avgAuctionShare=null）且处于 09:30 未闭合分钟时，
+    //    若昨日存在 prevAuctionTurnover，应无缝回退至昨日单日贝叶斯预测而非返回 null
+    const fullPrev = makeDay(0.05, 120_000);
+    const noAuctionProfile = buildPredictionProfile([{ bars: fullPrev, auctionTurnover: null }]);
+    expect(noAuctionProfile!.avgAuctionShare).toBeNull();
+
+    const m0At10s = evaluateEnergy({
+      todaySeries: [],
+      prevSeries: fullPrev,
+      minuteIndex: 0,
+      currentTodayCumTurnover: 3000,
+      elapsedSeconds: 10,
+      prevFullDayTurnover: 120_000,
+      prevAuctionTurnover: 2000,
+      predictionProfile: noAuctionProfile,
+    });
+    expect(m0At10s.predictedFullDayTurnover).not.toBeNull();
+    expect(m0At10s.predictedFullDayTurnover!).toBeGreaterThan(0);
+  });
 });

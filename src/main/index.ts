@@ -42,6 +42,7 @@ import {
   resolvePreloadPath,
   resolveRendererHtmlPath,
 } from './windows';
+import { resolveAutoLaunchSettings } from './windows/autoLaunch';
 
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -67,11 +68,14 @@ let scheduler: PollingScheduler | null = null;
 let replayEngine: DayReplayEngine | null = null;
 let replayCliOptions: ReplayCliOptions | null = null;
 
+let replayCliParseError: string | null = null;
+
 if (isDevMode) {
   try {
     replayCliOptions = parseReplayArgs(process.argv);
   } catch (err: unknown) {
-    console.error('[main] Invalid --replay argument:', err instanceof Error ? err.message : String(err));
+    replayCliParseError = err instanceof Error ? err.message : String(err);
+    console.error('[main] Invalid --replay argument:', replayCliParseError);
   }
 }
 
@@ -108,22 +112,20 @@ function handleAlertTriggered(event: AlertEventInput): void {
 }
 
 function applyAutoLaunchSetting(enabled: boolean): boolean {
-  if (process.platform !== 'win32' && process.platform !== 'darwin') {
+  const loginItemOptions = resolveAutoLaunchSettings({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    enabled,
+    execPath: process.execPath,
+    argv: process.argv,
+    cwd: process.cwd(),
+    portableExecutableFile: process.env.PORTABLE_EXECUTABLE_FILE,
+  });
+  if (!loginItemOptions) {
     return false;
   }
   try {
-    if (app.isPackaged) {
-      app.setLoginItemSettings({ openAtLogin: enabled });
-    } else if (process.platform === 'win32') {
-      const appArg = process.argv[1] ? path.resolve(process.argv[1]) : process.cwd();
-      app.setLoginItemSettings({
-        openAtLogin: enabled,
-        path: process.execPath,
-        args: [appArg],
-      });
-    } else {
-      app.setLoginItemSettings({ openAtLogin: enabled });
-    }
+    app.setLoginItemSettings(loginItemOptions);
     return true;
   } catch (err: unknown) {
     console.warn(
@@ -454,6 +456,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.ALERT_SIMULATE,
     (_event, direction: AlertDirection, symbol?: string) => {
+      if (replayEngine) {
+        throw new Error('回放模式下禁止触发模拟实盘告警，防止写入 alert_events 或弹出系统通知。');
+      }
       if (!alertDispatcher) {
         throw new Error('AlertDispatcher is not initialized.');
       }
@@ -478,8 +483,10 @@ function initServices(): void {
   const encryptedKeyPath = path.join(userDataDir, ENCRYPTED_KEY_FILENAME);
 
   database = new AppDatabase(dbPath);
-  const todayShanghai = getShanghaiParts(Date.now()).dateStr;
-  database.pruneOlderThanTradingDays(DEFAULT_RETENTION_TRADING_DAYS, todayShanghai);
+  if (!replayCliOptions) {
+    const todayShanghai = getShanghaiParts(Date.now()).dateStr;
+    database.pruneOlderThanTradingDays(DEFAULT_RETENTION_TRADING_DAYS, todayShanghai);
+  }
 
   secretStore = new SecretStore({
     encryptedFilePath: encryptedKeyPath,
@@ -565,11 +572,12 @@ function initServices(): void {
     onOpenSettings: () => {
       windowManager?.openDetail({ tab: 'settings' });
     },
-    onSimulateAlert: isDevMode
-      ? (direction) => {
-          alertDispatcher?.dispatchSimulated(direction);
-        }
-      : undefined,
+    onSimulateAlert:
+      isDevMode && !replayCliOptions
+        ? (direction) => {
+            alertDispatcher?.dispatchSimulated(direction);
+          }
+        : undefined,
     onQuit: requestQuit,
   });
 
@@ -634,45 +642,65 @@ function initServices(): void {
   }
 }
 
-if (!singleInstanceLock) {
+if (replayCliParseError) {
+  // --replay 参数非法时快速失败退出，严禁静默降级为实盘实时轮询
+  app.exit(1);
+} else if (!singleInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
     windowManager?.showHud();
   });
 
-  app.whenReady().then(() => {
-    initServices();
-    registerIpcHandlers();
+  app
+    .whenReady()
+    .then(() => {
+      initServices();
+      registerIpcHandlers();
 
-    if (shellSettings) {
-      bossKeyManager?.registerInitial(shellSettings.bossKey);
-      if (shellSettings.autoLaunch) {
-        applyAutoLaunchSetting(true);
+      if (shellSettings) {
+        bossKeyManager?.registerInitial(shellSettings.bossKey);
+        if (shellSettings.autoLaunch) {
+          applyAutoLaunchSetting(true);
+        }
       }
-    }
 
-    windowManager?.createHudWindow();
-    trayManager?.init(
-      buildShellState(),
-      replayEngine?.getLatestState() ?? scheduler?.getLatestState() ?? null
-    );
+      windowManager?.createHudWindow();
+      trayManager?.init(
+        buildShellState(),
+        replayEngine?.getLatestState() ?? scheduler?.getLatestState() ?? null
+      );
 
-    if (replayEngine) {
-      replayEngine.start();
-    } else {
-      void scheduler?.start().catch((err: unknown) => {
-        console.error(
-          '[main] PollingScheduler start failed:',
-          err instanceof Error ? err.message : String(err)
-        );
+      if (replayEngine) {
+        replayEngine.start();
+      } else {
+        void scheduler?.start().catch((err: unknown) => {
+          console.error(
+            '[main] PollingScheduler start failed:',
+            err instanceof Error ? err.message : String(err)
+          );
+        });
+      }
+
+      app.on('activate', () => {
+        windowManager?.showHud();
       });
-    }
-
-    app.on('activate', () => {
-      windowManager?.showHud();
+    })
+    .catch((err: unknown) => {
+      console.error(
+        '[main] Startup failed:',
+        err instanceof Error ? err.message : String(err)
+      );
+      replayEngine?.stop();
+      replayEngine = null;
+      scheduler?.stop();
+      scheduler = null;
+      windowManager?.destroyAll();
+      windowManager = null;
+      database?.close();
+      database = null;
+      app.exit(1);
     });
-  });
 
   // 关闭窗口仅隐藏至托盘，不自动退出应用；只有托盘「退出」触发真正退出
   app.on('window-all-closed', () => {

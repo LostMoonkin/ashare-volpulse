@@ -126,8 +126,8 @@ function toTurnoverMap(series: readonly MinuteTurnoverPoint[]): Map<number, numb
 
 /**
  * 从最近 N 个历史完整交易日构建多日平均分时成交占比模板。
- * - 仅采用包含收盘末根（minuteIndex === 239）且全天成交额 > 0 的有效历史日
- * - 无有效历史日时返回 null（调用方自动回退昨日单日基线）
+ * - 严格要求历史日具备完整 240 根连续分钟（0..239）且收盘累计成交额 > 0，防止残缺日污染曲线或造成上午预测缺失
+ * - 无有效完整历史日时返回 null（调用方自动回退昨日单日基线）
  */
 export function buildPredictionProfile(
   days: readonly HistoricalDaySeries[]
@@ -140,13 +140,21 @@ export function buildPredictionProfile(
 
   for (const day of days) {
     const map = toTurnoverMap(day.bars);
+    if (map.size < 240) {
+      continue;
+    }
     const fullDayTurnover = map.get(239);
-    if (fullDayTurnover === undefined || fullDayTurnover <= 0) {
+    const firstMinTurnover = map.get(0);
+    if (
+      fullDayTurnover === undefined ||
+      fullDayTurnover <= 0 ||
+      firstMinTurnover === undefined
+    ) {
       continue;
     }
     const auctionShare =
       isValidNumber(day.auctionTurnover) && day.auctionTurnover >= 0
-        ? Math.min(1, day.auctionTurnover / fullDayTurnover)
+        ? Math.min(firstMinTurnover / fullDayTurnover, Math.min(1, day.auctionTurnover / fullDayTurnover))
         : null;
     validDays.push({ map, fullDayTurnover, auctionShare });
   }
@@ -158,16 +166,8 @@ export function buildPredictionProfile(
   const avgFullDayTurnover =
     validDays.reduce((sum, d) => sum + d.fullDayTurnover, 0) / validDays.length;
 
-  const auctionShares = validDays
-    .map((d) => d.auctionShare)
-    .filter((s): s is number => s !== null);
-  const avgAuctionShare =
-    auctionShares.length > 0
-      ? auctionShares.reduce((sum, s) => sum + s, 0) / auctionShares.length
-      : null;
-
   const minuteShares = new Map<number, number>();
-  let runningMaxShare = avgAuctionShare ?? 0;
+  let runningMaxShare = 0;
 
   for (let m = 0; m <= 239; m++) {
     let sumShare = 0;
@@ -185,6 +185,18 @@ export function buildPredictionProfile(
       minuteShares.set(m, avg);
     }
   }
+
+  const auctionShares = validDays
+    .map((d) => d.auctionShare)
+    .filter((s): s is number => s !== null);
+  const firstMinAvgShare = minuteShares.get(0) ?? 1;
+  const avgAuctionShare =
+    auctionShares.length > 0
+      ? Math.min(
+          firstMinAvgShare,
+          auctionShares.reduce((sum, s) => sum + s, 0) / auctionShares.length
+        )
+      : null;
 
   return {
     sampleDays: validDays.length,
@@ -429,7 +441,7 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
     }
   }
 
-  // 全天预测成交额：优先采用多日分时占比模板 + 剩余时段贝叶斯收缩；无模板时回退至昨日单日占比 + 贝叶斯收缩
+  // 全天预测成交额：优先采用多日分时占比模板 + 剩余时段贝叶斯收缩；模板无法对齐当前分钟/秒数时无缝回退至昨日单日占比 + 贝叶斯收缩
   if (todayAtT !== null && hasValidElapsed) {
     if (input.predictionProfile && input.predictionProfile.sampleDays > 0) {
       const profileShare = alignProfileShare(input.predictionProfile, t, elapsedSeconds);
@@ -441,7 +453,9 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
           priorStrength: cfg.predictionPriorStrength,
         });
       }
-    } else if (
+    }
+    if (
+      predictedFullDayTurnover === null &&
       prevAlignedAtT !== null &&
       prevAlignedAtT > 0 &&
       isValidNumber(input.prevFullDayTurnover) &&

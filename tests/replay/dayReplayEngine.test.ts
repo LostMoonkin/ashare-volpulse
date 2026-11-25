@@ -241,4 +241,71 @@ describe('DayReplayEngine', () => {
     expect(missingMinute.cum).toBeNull();
     expect(missingMinute.degraded).toBe(true);
   });
+
+  it('guards against cross-gap barTurnover inflation, 399006.SZ cross-source scope mismatch, and reloads watchlist on re-run', () => {
+    const db = createMemoryDb();
+    db.upsertTradingDays([
+      { date: '2026-11-23', isOpen: true },
+      { date: '2026-11-24', isOpen: true },
+    ]);
+
+    for (const sym of [...MONITORED_INDEX_SYMBOLS, '600519.SH']) {
+      const prevBars: IntradayBarRow[] = [];
+      const todayBars: IntradayBarRow[] = [];
+      for (let m = 0; m < 240; m++) {
+        prevBars.push({
+          symbol: sym,
+          tradeDate: '2026-11-23',
+          minuteIndex: m,
+          minuteStr: minuteIndexToLabel(m),
+          price: 2000,
+          cumVolume: 1_000_000 * (m + 1),
+          cumTurnover: (m + 1) * 100,
+          barTurnover: 100,
+          source: 'tencent',
+        });
+        // 000001.SH 缺失 11..14 分钟，第 15 分钟写有膨胀的 500 增量
+        if (sym === '000001.SH' && m >= 11 && m <= 14) continue;
+        todayBars.push({
+          symbol: sym,
+          tradeDate: '2026-11-24',
+          minuteIndex: m,
+          minuteStr: minuteIndexToLabel(m),
+          price: 2000,
+          cumVolume: 1_000_000 * (m + 1),
+          cumTurnover: (m + 1) * 100,
+          barTurnover: sym === '000001.SH' && m === 15 ? 500 : 100,
+          // 399006.SZ 今日用 eastmoney、昨日用 tencent → 跨源口径冲突
+          source: sym === '399006.SZ' ? 'eastmoney' : 'tencent',
+        });
+      }
+      db.upsertIntradayBars(prevBars);
+      db.upsertIntradayBars(todayBars);
+    }
+
+    const engine = new DayReplayEngine({ database: db, tradeDate: '2026-11-24', stepIntervalMs: 0 });
+    const s1 = engine.runAllSteps();
+
+    // 1. 跨缺口首分钟（minuteIndex=15）barTurnover 必须标为 null，杜绝 500+100=600 虚增
+    const gapBar15 = s1.finalState.marketTotal.todaySeries.find((b) => b.minuteIndex === 15);
+    expect(gapBar15?.barTurnover).toBeNull();
+
+    // 2. 399006.SZ 跨源口径冲突必须降级且置空 metrics（与 PollingScheduler 口径完全一致）
+    const cyb = s1.finalState.indices.find((i) => i.symbol === '399006.SZ');
+    expect(cyb?.degraded).toBe(true);
+    expect(cyb?.degradedReason).toBe('CROSS_SOURCE_SCOPE_MISMATCH');
+    expect(cyb?.metrics).toBeNull();
+
+    // 3. 回放期间新增自选股后重新执行 runAllSteps 应自动加载并纳入回放
+    expect(s1.finalState.watchlist).toHaveLength(0);
+    db.upsertWatchlistItem({
+      symbol: '600519.SH',
+      name: '贵州茅台',
+      sortOrder: 0,
+      alertEnabled: true,
+      customThresholdsJson: null,
+    });
+    const s2 = engine.runAllSteps();
+    expect(s2.finalState.watchlist.map((w) => w.symbol)).toEqual(['600519.SH']);
+  });
 });

@@ -18,7 +18,6 @@ import {
   type IntradayPredictionProfile,
   type MarketPhase,
   type SymbolAlertOverride,
-  type SymbolMinuteBar,
   type SymbolTurnoverSnapshot,
 } from '../../core';
 import {
@@ -53,6 +52,11 @@ import type {
   WatchlistItemRow,
 } from '../../shared/types';
 import {
+  getCybScopeGroup,
+  hasCybCrossSourceMismatch,
+  toAggregatorBars,
+} from '../../shared/seriesGuards';
+import {
   ProviderRequestError,
   defaultSleep,
   type HithinkProvider,
@@ -84,8 +88,6 @@ const SEC_11_31 = 11 * 3600 + 31 * 60;
 const SEC_15_00 = 15 * 3600;
 const SEC_15_01 = 15 * 3600 + 60;
 const SEC_15_10 = 15 * 3600 + 10 * 60;
-
-type CybScopeGroup = 'tx_sina' | 'em_hithink';
 
 interface PendingMinuteBar {
   minuteIndex: number;
@@ -143,46 +145,6 @@ function nextCalendarDate(dateStr: string): string {
 }
 
 /**
- * 创业板指（399006.SZ）口径分组（docs/DATA_SOURCES.md §2.2）：
- * - 腾讯与新浪口径 100% 一致（创业板全市场股票）
- * - 东财与同花顺口径一致（含扩展统计口径，较腾讯/新浪高约 +1.13%）
- */
-function getCybScopeGroup(source: string | null | undefined): CybScopeGroup | null {
-  if (source === 'tencent' || source === 'sina') return 'tx_sina';
-  if (source === 'eastmoney' || source === 'hithink') return 'em_hithink';
-  return null;
-}
-
-/**
- * 检测 399006.SZ 在昨日基线、今日已落盘分时与实时快照之间是否存在跨口径混用。
- * 覆盖 LIVE 与 REPLAY 两种模式，防止将不同口径相除制造 +1.13% 假放量。
- */
-function hasCybCrossSourceMismatch(params: {
-  symbol: string;
-  todayBars: readonly IntradayBarRow[];
-  prevBars: readonly IntradayBarRow[];
-  liveSnap: QuoteSnapshot | null;
-}): boolean {
-  if (params.symbol !== '399006.SZ') return false;
-  const groups = new Set<CybScopeGroup>();
-
-  for (const bar of params.prevBars) {
-    const g = getCybScopeGroup(bar.source);
-    if (g) groups.add(g);
-  }
-  for (const bar of params.todayBars) {
-    const g = getCybScopeGroup(bar.source);
-    if (g) groups.add(g);
-  }
-  if (params.liveSnap) {
-    const g = getCybScopeGroup(params.liveSnap.source);
-    if (g) groups.add(g);
-  }
-
-  return groups.size > 1;
-}
-
-/**
  * 检查有序分钟序列是否存在缺口（含头部缺 09:30、内部跳号或尾部截断）。
  * 当 expectedLastClosedIndex < 0（如 09:30 第一分钟尚未闭合）时，空序列不视为缺口。
  */
@@ -209,28 +171,6 @@ function hasSeriesGap(
     return true;
   }
   return false;
-}
-
-/**
- * 构造传给 aggregateMarketTotalSeries 的分钟点，对跨缺口的分钟省略 barTurnover，
- * 让核心聚合引擎将其标为 null，避免将多分钟累计差值虚增到单分钟柱状图。
- */
-function toAggregatorBars(bars: readonly IntradayBarRow[]): SymbolMinuteBar[] {
-  return bars.map((bar, i) => {
-    const prev = i > 0 ? bars[i - 1] : null;
-    const isContiguous =
-      bar.minuteIndex === 0 || (prev !== null && prev.minuteIndex === bar.minuteIndex - 1);
-    return isContiguous
-      ? {
-          minuteIndex: bar.minuteIndex,
-          cumTurnover: bar.cumTurnover,
-          barTurnover: bar.barTurnover,
-        }
-      : {
-          minuteIndex: bar.minuteIndex,
-          cumTurnover: bar.cumTurnover,
-        };
-  });
 }
 
 /**

@@ -46,6 +46,7 @@ export function DetailView() {
   const modalOpenRef = useRef<boolean>(false);
   const alertScopeRef = useRef<AlertHistoryScope>('today');
   const activeTradeDateRef = useRef<string | undefined>(undefined);
+  const lastReplayStepRef = useRef<number>(-1);
 
   const activeTradeDate = market?.status.tradeDate ?? undefined;
   alertScopeRef.current = alertScope;
@@ -115,7 +116,19 @@ export function DetailView() {
       .catch(() => {});
     loadWatchlist();
 
-    const unsubMarket = window.api.onMarketStateUpdated(setMarket);
+    const unsubMarket = window.api.onMarketStateUpdated((next) => {
+      const replayInfo = next.status.replay;
+      if (replayInfo?.active) {
+        if (replayInfo.stepIndex === 0 || replayInfo.stepIndex < lastReplayStepRef.current) {
+          // 重新回放时立即清空上一轮界面残留告警，与主进程 replayAlerts 保持一致
+          setAlerts([]);
+        }
+        lastReplayStepRef.current = replayInfo.stepIndex;
+      } else {
+        lastReplayStepRef.current = -1;
+      }
+      setMarket(next);
+    });
     const unsubShell = window.api.onShellStateUpdated((next) => applyShellState(next, false));
     const unsubMonitor = window.api.onMonitorConfigUpdated(setMonitorConfig);
     const unsubAlert = window.api.onAlertTriggered((payload) => {

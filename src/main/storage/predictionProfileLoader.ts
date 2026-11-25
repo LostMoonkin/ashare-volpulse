@@ -21,7 +21,7 @@ export function loadSymbolPredictionProfile(
   maxDays = DEFAULT_PREDICTION_PROFILE_DAYS
 ): IntradayPredictionProfile | null {
   if (!beforeTradeDate) return null;
-  const dates = db.getRecentRecordedBarDatesBefore(beforeTradeDate, maxDays);
+  const dates = db.getRecentCompleteBarDatesForSymbol(symbol, beforeTradeDate, maxDays);
   if (dates.length === 0) return null;
 
   const days: HistoricalDaySeries[] = [];
@@ -47,10 +47,10 @@ export function loadMarketTotalPredictionProfile(
   maxDays = DEFAULT_PREDICTION_PROFILE_DAYS
 ): IntradayPredictionProfile | null {
   if (!beforeTradeDate) return null;
-  const dates = db.getRecentRecordedBarDatesBefore(beforeTradeDate, maxDays);
+  const [shSym, szSym] = MARKET_TOTAL_COMPONENTS;
+  const dates = db.getRecentCompletePairBarDates(shSym, szSym, beforeTradeDate, maxDays);
   if (dates.length === 0) return null;
 
-  const [shSym, szSym] = MARKET_TOTAL_COMPONENTS;
   const days: HistoricalDaySeries[] = [];
 
   for (const d of dates) {

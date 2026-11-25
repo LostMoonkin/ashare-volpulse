@@ -11,8 +11,8 @@ import {
   shanghaiToTimestampMs,
   type AlertRuleConfig,
   type EnergyEngineConfig,
+  type IntradayPredictionProfile,
   type SymbolAlertOverride,
-  type SymbolMinuteBar,
 } from '../../core';
 import {
   CORE_INDICES,
@@ -24,6 +24,7 @@ import {
   MONITORED_INDEX_SYMBOLS,
   REPLAY_ALERT_PREFIX,
 } from '../../shared/constants';
+import { hasCybCrossSourceMismatch, toAggregatorBars } from '../../shared/seriesGuards';
 import type {
   AlertDispatchPayload,
   AlertEventRow,
@@ -42,7 +43,6 @@ import {
   loadMarketTotalPredictionProfile,
   loadSymbolPredictionProfile,
 } from '../storage/predictionProfileLoader';
-import type { IntradayPredictionProfile } from '../../core';
 
 const TOTAL_MINUTE_BARS = 240;
 const TOTAL_REPLAY_STEPS = 241; // 0 = 09:25 集合竞价，1..240 = minuteIndex 0..239
@@ -180,7 +180,7 @@ export class DayReplayEngine {
   private energyConfig: EnergyEngineConfig;
   private readonly alertEngine: AlertEngine;
 
-  private readonly watchlistItems: WatchlistItemRow[];
+  private watchlistItems: WatchlistItemRow[] = [];
   private readonly todayBarsBySymbol = new Map<string, IntradayBarRow[]>();
   private readonly prevBarsBySymbol = new Map<string, IntradayBarRow[]>();
   private readonly todayAuctionBySymbol = new Map<string, { openPrice: number; auctionTurnover: number }>();
@@ -257,33 +257,7 @@ export class DayReplayEngine {
     }
 
     for (const sym of symbols) {
-      const todayBars = this.db.getIntradayBars(sym, this.tradeDate);
-      this.todayBarsBySymbol.set(sym, todayBars);
-
-      const todayAuc = this.db.getAuctionSnapshot(sym, this.tradeDate);
-      if (todayAuc) {
-        this.todayAuctionBySymbol.set(sym, {
-          openPrice: todayAuc.openPrice,
-          auctionTurnover: todayAuc.auctionTurnover,
-        });
-      }
-
-      if (this.prevTradeDate) {
-        const prevBars = this.db.getIntradayBars(sym, this.prevTradeDate);
-        this.prevBarsBySymbol.set(sym, prevBars);
-
-        const prevAuc = this.db.getAuctionSnapshot(sym, this.prevTradeDate);
-        if (prevAuc) {
-          this.prevAuctionBySymbol.set(sym, {
-            openPrice: prevAuc.openPrice,
-            auctionTurnover: prevAuc.auctionTurnover,
-          });
-        }
-      } else {
-        this.prevBarsBySymbol.set(sym, []);
-      }
-
-      this.predictionProfiles.set(sym, loadSymbolPredictionProfile(this.db, sym, this.tradeDate));
+      this.loadRecordedSymbol(sym);
     }
 
     this.predictionProfiles.set(
@@ -295,6 +269,7 @@ export class DayReplayEngine {
   /** 启动加速定时回放（驱动渲染进程从 09:25 推进至 15:00） */
   start(): void {
     this.stop();
+    this.reloadWatchlistAndPreload();
     this.currentStepIndex = -1;
     this.replayAlerts = [];
     this.nextReplayAlertId = -1;
@@ -310,6 +285,46 @@ export class DayReplayEngine {
         this.stop();
       }
     }, interval);
+  }
+
+  private reloadWatchlistAndPreload(): void {
+    this.watchlistItems = this.db.getWatchlist();
+    for (const item of this.watchlistItems) {
+      const sym = item.symbol.trim().toUpperCase();
+      if (!this.todayBarsBySymbol.has(sym)) {
+        this.loadRecordedSymbol(sym);
+      }
+    }
+  }
+
+  private loadRecordedSymbol(sym: string): void {
+    const todayBars = this.db.getIntradayBars(sym, this.tradeDate);
+    this.todayBarsBySymbol.set(sym, todayBars);
+
+    const todayAuc = this.db.getAuctionSnapshot(sym, this.tradeDate);
+    if (todayAuc) {
+      this.todayAuctionBySymbol.set(sym, {
+        openPrice: todayAuc.openPrice,
+        auctionTurnover: todayAuc.auctionTurnover,
+      });
+    }
+
+    if (this.prevTradeDate) {
+      const prevBars = this.db.getIntradayBars(sym, this.prevTradeDate);
+      this.prevBarsBySymbol.set(sym, prevBars);
+
+      const prevAuc = this.db.getAuctionSnapshot(sym, this.prevTradeDate);
+      if (prevAuc) {
+        this.prevAuctionBySymbol.set(sym, {
+          openPrice: prevAuc.openPrice,
+          auctionTurnover: prevAuc.auctionTurnover,
+        });
+      }
+    } else {
+      this.prevBarsBySymbol.set(sym, []);
+    }
+
+    this.predictionProfiles.set(sym, loadSymbolPredictionProfile(this.db, sym, this.tradeDate));
   }
 
   stop(): void {
@@ -463,6 +478,7 @@ export class DayReplayEngine {
   /** 同步完整跑通 09:25 → 15:00 全天 241 帧并输出校验汇总 */
   runAllSteps(): ReplayFullRunSummary {
     this.stop();
+    this.reloadWatchlistAndPreload();
     this.currentStepIndex = -1;
     this.replayAlerts = [];
     this.nextReplayAlertId = -1;
@@ -561,20 +577,13 @@ export class DayReplayEngine {
     const szTodayVisible =
       minuteIndex === null ? [] : szTodayAll.filter((b) => b.minuteIndex <= minuteIndex);
 
-    const toMinuteBars = (bars: readonly IntradayBarRow[]): SymbolMinuteBar[] =>
-      bars.map((b) => ({
-        minuteIndex: b.minuteIndex,
-        cumTurnover: b.cumTurnover,
-        barTurnover: b.barTurnover,
-      }));
-
     const todayAggSeries = aggregateMarketTotalSeries(
-      toMinuteBars(shTodayVisible),
-      toMinuteBars(szTodayVisible)
+      toAggregatorBars(shTodayVisible),
+      toAggregatorBars(szTodayVisible)
     );
     const prevAggSeries = aggregateMarketTotalSeries(
-      toMinuteBars(shPrevAll),
-      toMinuteBars(szPrevAll)
+      toAggregatorBars(shPrevAll),
+      toAggregatorBars(szPrevAll)
     );
 
     const shTodayAuc = this.todayAuctionBySymbol.get(shSym)?.auctionTurnover ?? null;
@@ -780,11 +789,21 @@ export class DayReplayEngine {
     }
 
     const curBar = todayVisible.find((b) => b.minuteIndex === minuteIndex) ?? null;
+    const crossSourceMismatch = hasCybCrossSourceMismatch({
+      symbol,
+      todayBars: todayVisible,
+      prevBars: prevAll,
+      liveSnap: null,
+    });
+
     let degraded = false;
     let degradedReason: string | null = null;
     if (!curBar) {
       degraded = true;
       degradedReason = 'MISSING_MINUTE_BAR';
+    } else if (crossSourceMismatch) {
+      degraded = true;
+      degradedReason = 'CROSS_SOURCE_SCOPE_MISMATCH';
     }
     if (prevAll.length === 0) {
       degraded = true;
@@ -811,22 +830,23 @@ export class DayReplayEngine {
       : null;
 
     const alertCfg = resolveAlertConfig(this.alertEngine.getGlobalConfig(), params.symbolOverride);
-    const metrics = curBar
-      ? evaluateEnergy({
-          todaySeries: todayVisible,
-          prevSeries: prevAll,
-          minuteIndex,
-          currentTodayCumTurnover: curBar.cumTurnover,
-          elapsedSeconds: 60,
-          prevFullDayTurnover,
-          prevAuctionTurnover: prevAuc,
-          predictionProfile: this.predictionProfiles.get(symbol) ?? null,
-          config: {
-            ...this.energyConfig,
-            slopeWindow: alertCfg.slopeWindow,
-          },
-        })
-      : null;
+    const metrics =
+      curBar && !crossSourceMismatch
+        ? evaluateEnergy({
+            todaySeries: todayVisible,
+            prevSeries: prevAll,
+            minuteIndex,
+            currentTodayCumTurnover: curBar.cumTurnover,
+            elapsedSeconds: 60,
+            prevFullDayTurnover,
+            prevAuctionTurnover: prevAuc,
+            predictionProfile: this.predictionProfiles.get(symbol) ?? null,
+            config: {
+              ...this.energyConfig,
+              slopeWindow: alertCfg.slopeWindow,
+            },
+          })
+        : null;
 
     if (metrics) {
       const evalRes = this.alertEngine.evaluate({
