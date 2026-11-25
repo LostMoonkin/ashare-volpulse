@@ -225,10 +225,14 @@ export const HITHINK_API_KEY_ENV = 'HITHINK_FINANCE_API_KEY';
 export const ENCRYPTED_KEY_FILENAME = 'hithink-key.enc';
 
 /** 本地 SQLite 数据库文件名（存放在 Electron userData 目录） */
-export const DATABASE_FILENAME = 'a-share-monitor.sqlite';
+export const DATABASE_FILENAME = 'ashare-volpulse.sqlite';
+
+/** 更名前的旧版 userData 目录名与数据库文件名（用于首次启动平滑迁移，防止丢数据） */
+export const LEGACY_USER_DATA_DIRNAME = 'a-share-monitor';
+export const LEGACY_DATABASE_FILENAME = 'a-share-monitor.sqlite';
 
 /** Windows AppUserModelId（保证开发态与便携版原生 Toast 通知正常弹出） */
-export const APP_USER_MODEL_ID = 'com.asharemonitor.app';
+export const APP_USER_MODEL_ID = 'com.asharevolpulse.app';
 
 /** 桌面外壳持久化设置键（存入 SQLite app_settings） */
 export const SETTING_HUD_POSITION = 'shell.hudPosition';

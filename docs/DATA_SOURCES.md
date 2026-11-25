@@ -4,7 +4,7 @@
 > **宿主机环境**：Windows x64，Node.js `v26.7.0`，npm `11.19.0`（无 MSVC / 无 `cl.exe`）  
 > **探针脚本**：[`scripts/spike-data-sources.mjs`](../scripts/spike-data-sources.mjs)
 
-本文档是 `a-share-monitor` 行情适配器、字段解析、成交额单位换算、分时分钟轴对齐、轮询限流预算与本地 SQLite 选型的权威实测依据。修改 `src/main/providers/`、`src/main/scheduler/` 或 `src/main/storage/` 前请先核对本文档。
+本文档是 `ashare-volpulse` 行情适配器、字段解析、成交额单位换算、分时分钟轴对齐、轮询限流预算与本地 SQLite 选型的权威实测依据。修改 `src/main/providers/`、`src/main/scheduler/` 或 `src/main/storage/` 前请先核对本文档。
 
 ---
 

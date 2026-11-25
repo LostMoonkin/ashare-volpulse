@@ -1,4 +1,4 @@
-appId: com.asharemonitor.app
+appId: com.asharevolpulse.app
 productName: A股能量看板
 directories:
   output: release
@@ -14,7 +14,7 @@ win:
       arch:
         - x64
 portable:
-  artifactName: a-share-monitor-${version}-win-${arch}-portable.${ext}
+  artifactName: ashare-volpulse-${version}-win-${arch}-portable.${ext}
 mac:
   category: public.app-category.finance
   identity: null
@@ -27,6 +27,6 @@ mac:
       arch:
         - arm64
         - x64
-  artifactName: a-share-monitor-${version}-mac-${arch}.${ext}
+  artifactName: ashare-volpulse-${version}-mac-${arch}.${ext}
 dmg:
-  artifactName: a-share-monitor-${version}-mac-${arch}.${ext}
+  artifactName: ashare-volpulse-${version}-mac-${arch}.${ext}

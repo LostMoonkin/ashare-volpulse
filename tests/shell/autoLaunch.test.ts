@@ -39,7 +39,7 @@ describe('resolveAutoLaunchSettings', () => {
       enabled: true,
       execPath: 'D:\\node_modules\\electron\\electron.exe',
       argv: ['D:\\node_modules\\electron\\electron.exe', '.'],
-      cwd: 'D:\\Workspace\\a-share-monitor',
+      cwd: 'D:\\Workspace\\ashare-volpulse',
     });
     expect(devOpts).toEqual({
       openAtLogin: true,

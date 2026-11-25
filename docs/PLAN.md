@@ -1,6 +1,6 @@
-# A 股实时能量看板（a-share-monitor）实施计划
+# A 股实时能量看板（ashare-volpulse）实施计划
 
-本文档是 `a-share-monitor` 项目的权威实施计划，汇总已确认的需求口径、数学定义、系统架构与分阶段落地任务。后续开发请严格按阶段推进，并满足每阶段的 **Completion Criteria**。
+本文档是 `ashare-volpulse` 项目的权威实施计划，汇总已确认的需求口径、数学定义、系统架构与分阶段落地任务。后续开发请严格按阶段推进，并满足每阶段的 **Completion Criteria**。
 
 ---
 
@@ -96,7 +96,7 @@
 ## 3. 系统架构与目录规划
 
 ```text
-a-share-monitor/
+ashare-volpulse/
 ├── AGENTS.md
 ├── docs/
 │   ├── PLAN.md                  # 本实施计划

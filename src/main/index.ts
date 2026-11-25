@@ -33,6 +33,7 @@ import {
 import { DayReplayEngine, parseReplayArgs, type ReplayCliOptions } from './replay';
 import { PollingScheduler } from './scheduler';
 import { AppDatabase } from './storage/database';
+import { migrateLegacyUserDataDir } from './storage/legacyDataMigration';
 import { MonitorSettingsStore } from './storage/monitorSettingsStore';
 import { SecretStore } from './storage/secretStore';
 import { WatchlistService } from './storage/watchlistService';
@@ -521,6 +522,14 @@ function registerIpcHandlers(): void {
 
 function initServices(): void {
   const userDataDir = app.getPath('userData');
+  try {
+    migrateLegacyUserDataDir(userDataDir);
+  } catch (err: unknown) {
+    console.warn(
+      '[main] Legacy userData migration skipped:',
+      err instanceof Error ? err.message : String(err)
+    );
+  }
   const dbPath = path.join(userDataDir, DATABASE_FILENAME);
   const encryptedKeyPath = path.join(userDataDir, ENCRYPTED_KEY_FILENAME);
 

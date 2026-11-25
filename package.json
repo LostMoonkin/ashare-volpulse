@@ -1,7 +1,8 @@
 {
-  "name": "a-share-monitor",
+  "name": "ashare-volpulse",
   "version": "0.1.0",
   "description": "Windows / macOS 桌面端 A 股盘中实时能量看板（紧凑悬浮窗 HUD + 可展开详情浮层 + 系统托盘）",
+  "license": "MIT",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {

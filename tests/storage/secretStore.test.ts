@@ -12,7 +12,7 @@ import {
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashare-secret-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashare-volpulse-secret-test-'));
   tempDirs.push(dir);
   return dir;
 }

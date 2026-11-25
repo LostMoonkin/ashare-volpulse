@@ -1,4 +1,4 @@
-# A 股实时能量看板（a-share-monitor）
+# A 股实时能量看板（ashare-volpulse）
 
 Windows / macOS 桌面端 A 股盘中实时量能监控与分析工具，采用 **紧凑悬浮窗 HUD + 可展开详情浮层 + 系统托盘/菜单栏** 形态（无独立浏览器 Web 页面），专注实时追踪沪深两市总成交额、四大核心指数与自选个股的放缩量状态及快速异动趋势。
 
@@ -175,7 +175,7 @@ git push origin v0.1.0
 应用正常运行录制了本地交易日分钟数据后，可通过回放模式重演 `09:25 → 15:00` 全流程（不发起实时轮询、回放告警标记为 `[回放]` 且不写入实盘 `alert_events`、不弹系统通知）：
 
 ```bash
-# 方式 1：只读离线全天回放校验脚本（默认读取 %APPDATA%\a-share-monitor\a-share-monitor.sqlite）
+# 方式 1：只读离线全天回放校验脚本（默认读取 %APPDATA%\ashare-volpulse\ashare-volpulse.sqlite，兼容旧目录）
 npm run verify:replay
 node scripts/verify-replay.mjs --db <sqlite路径> --date 2026-11-24
 
@@ -189,7 +189,7 @@ npx electron . --replay 2026-11-24 --replay-step-ms=100
 ## 目录结构
 
 ```text
-a-share-monitor/
+ashare-volpulse/
 ├── docs/
 │   ├── PLAN.md                   # 权威实施计划、领域规范与数学公式
 │   ├── DATA_SOURCES.md           # 数据源实测调研、口径核验与限流预算
@@ -222,5 +222,6 @@ a-share-monitor/
 
 - 详细设计与公式定义见 [docs/PLAN.md](docs/PLAN.md)
 - 数据源实测口径与限流结论见 [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md)
+- 开源协议：[MIT License](LICENSE)
 
 > **免责声明**：本项目仅用于 A 股盘中成交额与量能变化的本地实时可视化监控与复盘研究，不构成任何投资建议，也不包含任何自动下单或交易执行功能。

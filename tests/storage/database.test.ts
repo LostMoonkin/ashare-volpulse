@@ -9,7 +9,7 @@ import type { TradingDayRow } from '../../src/shared/types';
 const tempDirs: string[] = [];
 
 function createTempDbPath(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashare-db-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashare-volpulse-db-test-'));
   tempDirs.push(dir);
   return path.join(dir, 'test.sqlite');
 }

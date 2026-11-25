@@ -5,7 +5,7 @@
  * 用法：
  *   node scripts/verify-replay.mjs [--db <path-to-sqlite>] [--date YYYY-MM-DD]
  *
- * 默认查找 %APPDATA%\a-share-monitor\a-share-monitor.sqlite。
+ * 默认查找 %APPDATA%\ashare-volpulse\ashare-volpulse.sqlite（若不存在则回退查找旧路径 %APPDATA%\a-share-monitor\a-share-monitor.sqlite）。
  * 严格遵循 Phase 6 约束：
  * - 以只读方式读取实盘 SQLite 并载入内存库运行，绝不修改实盘数据库
  * - 直接复用真实 DayReplayEngine 与 src/core/ 实盘计算路径（不另写一套计算公式）
@@ -45,7 +45,11 @@ function parseCli(argv) {
   }
   if (!dbPath) {
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    dbPath = path.join(appData, 'a-share-monitor', 'a-share-monitor.sqlite');
+    const primaryDbPath = path.join(appData, 'ashare-volpulse', 'ashare-volpulse.sqlite');
+    const legacyDbPath = path.join(appData, 'a-share-monitor', 'a-share-monitor.sqlite');
+    dbPath = fs.existsSync(primaryDbPath) || !fs.existsSync(legacyDbPath)
+      ? primaryDbPath
+      : legacyDbPath;
   }
   return { dbPath, tradeDate };
 }
