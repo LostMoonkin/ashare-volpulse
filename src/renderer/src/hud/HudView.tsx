@@ -75,11 +75,16 @@ export function HudContent({
   const replay = status?.replay?.active ? status.replay : null;
   const isDegraded = Boolean(status?.degraded || status?.stale || total?.degraded);
   const volBadge = formatVolumeState(total?.metrics?.volumeState);
+  const isPostCloseReview =
+    !replay &&
+    status?.mode === 'REPLAY' &&
+    (status.phase === 'POST_MARKET' || status.phase === 'CLOSED_DAY');
   const slopeTrend = formatSlopeTrend(
     total?.metrics?.slope,
     total?.metrics?.windowMultiple,
     monitorConfig?.surgeSlopeThreshold ?? 3.0,
-    monitorConfig?.shrinkSlopeThreshold ?? -3.0
+    monitorConfig?.shrinkSlopeThreshold ?? -3.0,
+    { postCloseReview: isPostCloseReview }
   );
   const opacityPct = Math.round((shell?.settings.hudOpacity ?? 0.9) * 100);
 
@@ -184,7 +189,7 @@ export function HudContent({
                     : '待比对'}
                 </span>
                 <span className={`slope-chip slope-${slopeTrend.tone}`} title={slopeTrend.label}>
-                  <span className="slope-arrow">{slopeTrend.arrow}</span>
+                  <span className="slope-arrow">{slopeTrend.arrow || '·'}</span>
                 </span>
               </div>
             </div>
@@ -361,7 +366,7 @@ export function HudContent({
           <div className="hud-hero-sub">
             <span>预测全天 {formatTurnover(total?.metrics?.predictedFullDayTurnover)}</span>
             <span className={`slope-chip slope-${slopeTrend.tone}`}>
-              <span className="slope-arrow">{slopeTrend.arrow}</span>
+              {slopeTrend.arrow && <span className="slope-arrow">{slopeTrend.arrow}</span>}
               <span>{slopeTrend.label}</span>
             </span>
           </div>

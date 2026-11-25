@@ -69,5 +69,17 @@ describe('renderer format utils', () => {
       label: '急缩 -3.20%/分 · 0.60x',
       tone: 'shrink',
     });
+
+    // 盘后/休市复盘态：保留尾盘斜率数值，去掉急放/急缩标签并降为中性灰样式
+    expect(formatSlopeTrend(-17.45, 0.62, 3.0, -3.0, { postCloseReview: true })).toEqual({
+      arrow: '',
+      label: '尾盘 -17.45%/分 · 0.62x',
+      tone: 'flat',
+    });
+    expect(formatSlopeTrend(5.5, 1.8, 3.0, -3.0, { postCloseReview: true })).toEqual({
+      arrow: '',
+      label: '尾盘 +5.50%/分 · 1.80x',
+      tone: 'flat',
+    });
   });
 });

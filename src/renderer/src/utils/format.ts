@@ -16,7 +16,8 @@ export function formatSlopeTrend(
   slope: number | null | undefined,
   windowMultiple: number | null | undefined,
   surgeSlopeThreshold = 3.0,
-  shrinkSlopeThreshold = -3.0
+  shrinkSlopeThreshold = -3.0,
+  options?: { postCloseReview?: boolean }
 ): {
   arrow: string;
   label: string;
@@ -30,6 +31,11 @@ export function formatSlopeTrend(
     windowMultiple !== null && windowMultiple !== undefined && Number.isFinite(windowMultiple)
       ? ` · ${windowMultiple.toFixed(2)}x`
       : '';
+
+  // 盘后/休市静态复盘态：保留尾盘斜率数值，但去掉「急放/急缩」动态告警标签与红绿高亮
+  if (options?.postCloseReview) {
+    return { arrow: '', label: `尾盘 ${slopeStr}${multStr}`, tone: 'flat' };
+  }
 
   if (slope >= surgeSlopeThreshold) {
     return { arrow: '▲', label: `急放 ${slopeStr}${multStr}`, tone: 'surge' };
