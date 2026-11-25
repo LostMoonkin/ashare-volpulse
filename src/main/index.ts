@@ -316,7 +316,7 @@ function registerIpcHandlers(): void {
       return replayEngine.getLatestState();
     }
     if (!scheduler) return null;
-    return scheduler.refreshNow();
+    return scheduler.refreshNow({ forceReconcile: true });
   });
 
   ipcMain.handle(
@@ -609,7 +609,7 @@ function initServices(): void {
       if (replayEngine) {
         replayEngine.start();
       } else {
-        void scheduler?.refreshNow();
+        void scheduler?.refreshNow({ forceReconcile: true });
       }
     },
     onOpenSettings: () => {

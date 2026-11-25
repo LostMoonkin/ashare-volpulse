@@ -33,6 +33,7 @@ import {
   MONITORED_INDEX_NAMES,
   PRIMARY_RECOVERY_PROBE_INTERVAL_MS,
   SETTING_CALENDAR_SYNC_DATE,
+  SETTING_POST_CLOSE_RECONCILED,
   normalizeEnabledOptionalIndices,
   resolveDisplayedIndices,
   resolveMonitoredIndexSymbols,
@@ -88,8 +89,16 @@ const SEC_09_35 = 9 * 3600 + 35 * 60;
 const SEC_11_30 = 11 * 3600 + 30 * 60;
 const SEC_11_31 = 11 * 3600 + 31 * 60;
 const SEC_15_00 = 15 * 3600;
-const SEC_15_01 = 15 * 3600 + 60;
+const SEC_15_00_SETTLE = 15 * 3600 + 15;
+const SEC_15_02 = 15 * 3600 + 2 * 60;
+const SEC_15_05 = 15 * 3600 + 5 * 60;
 const SEC_15_10 = 15 * 3600 + 10 * 60;
+const MAX_AUTO_POST_CLOSE_RECONCILE_ATTEMPTS = 2;
+
+interface PostCloseReconciledRecord {
+  tradeDate: string;
+  symbols: string[];
+}
 
 interface PendingMinuteBar {
   minuteIndex: number;
@@ -195,7 +204,7 @@ function resolveSnapshotMinute(
   if (secondsOfDay > SEC_11_30 && secondsOfDay <= SEC_11_31) {
     return { minuteIndex: 119, elapsedSeconds: 60 };
   }
-  if (secondsOfDay > SEC_15_00 && secondsOfDay <= SEC_15_01) {
+  if (secondsOfDay > SEC_15_00 && secondsOfDay <= SEC_15_05) {
     return { minuteIndex: 239, elapsedSeconds: 60 };
   }
   return null;
@@ -287,6 +296,11 @@ export class PollingScheduler {
   private readonly lastBackfillAttemptAt = new Map<string, number>();
   private readonly intradaySourceBySymbol = new Map<string, ProviderId>();
   private readonly cybRealignedGroups = new Set<string>();
+  private postCloseReconciledDate: string | null = null;
+  private readonly postCloseReconciledSymbols = new Set<string>();
+  private readonly postCloseReconcileAttempts = new Map<string, number>();
+  private postCloseSettleSnapshotDoneDate: string | null = null;
+  private postCloseForceReconcilePending = false;
   private readonly recentAlerts: AlertEventInput[] = [];
   private latestState: MarketDashboardState | null = null;
 
@@ -434,9 +448,19 @@ export class PollingScheduler {
   /**
    * 手动/配置变更后立即刷新一次：
    * - 若当前已有在途轮询，排队合并为一次紧随其后的新鲜 tick，避免吞掉刚落盘的自选股或参数改动
+   * - 传入 forceReconcile=true（用户手动点「刷新」）时，在盘后/复盘态会强制重新拉取权威收盘分时校正尾盘竞价
    * - 若调度器处于运行态则顺便重置下一次定时唤醒
    */
-  async refreshNow(): Promise<MarketDashboardState> {
+  async refreshNow(options?: { forceReconcile?: boolean }): Promise<MarketDashboardState> {
+    if (options?.forceReconcile) {
+      this.postCloseForceReconcilePending = true;
+      this.postCloseSettleSnapshotDoneDate = null;
+      this.postCloseReconciledSymbols.clear();
+      this.postCloseReconcileAttempts.clear();
+      this.lastBackfillAttemptAt.clear();
+      this.configRevision += 1;
+    }
+
     let state: MarketDashboardState;
     if (this.pollInFlight) {
       if (!this.queuedRefresh) {
@@ -501,6 +525,28 @@ export class PollingScheduler {
       return NON_TRADING_WAKE_INTERVAL_MS;
     }
 
+    // 收盘集合竞价结算过渡窗（15:00:01–15:02:00）：
+    // 先在 15:00:15 补抓一次收盘竞价快照，再于 15:02:00 自动用上游权威分时线校准终态 240 根分钟线
+    if (this.lastPhase === 'POST_MARKET' && this.displayTradeDate === todayStr) {
+      const { secondsOfDay } = getShanghaiParts(nowMs);
+      const watchlistItems = this.db.getWatchlist();
+      const monitored = this.collectMonitoredSymbols(watchlistItems);
+      const hasUnreconciled = monitored.some((sym) => !this.postCloseReconciledSymbols.has(sym));
+      if (hasUnreconciled) {
+        if (
+          secondsOfDay < SEC_15_00_SETTLE &&
+          this.postCloseSettleSnapshotDoneDate !== this.displayTradeDate
+        ) {
+          const settleMs = shanghaiToTimestampMs(todayStr, 15, 0, 15);
+          return Math.max(1_000, settleMs - nowMs);
+        }
+        if (secondsOfDay < SEC_15_02) {
+          const reconcileMs = shanghaiToTimestampMs(todayStr, 15, 2, 0);
+          return Math.max(1_000, reconcileMs - nowMs);
+        }
+      }
+    }
+
     // 盘后与非交易日：零高频行情请求，仅保留纯本地时钟轻量唤醒以便跨日准点开盘
     const nextDay = nextCalendarDate(todayStr);
     const nextDayOpenMs = shanghaiToTimestampMs(nextDay, 9, 15, 0);
@@ -535,10 +581,18 @@ export class PollingScheduler {
       const nowMs = this.nowFn();
       const { dateStr: todayStr } = getShanghaiParts(nowMs);
       const nextPhase = getMarketPhase(nowMs, this.openTradingDaySet);
-      const watchlistSig = this.computeWatchlistSignature(this.db.getWatchlist());
+      const watchlistItems = this.db.getWatchlist();
+      const watchlistSig = this.computeWatchlistSignature(watchlistItems);
+      const needsClosingFollowup =
+        this.shouldRunPostCloseSettleSnapshot(nowMs, nextPhase) ||
+        this.collectMonitoredSymbols(watchlistItems).some((sym) =>
+          this.needsPostCloseReconcileForSymbol(sym, nowMs, nextPhase)
+        );
       if (
         todayStr === this.initializedForDate &&
         !this.calendarForceReload &&
+        !this.postCloseForceReconcilePending &&
+        !needsClosingFollowup &&
         nextPhase === this.lastPhase &&
         watchlistSig === this.lastWatchlistSignature &&
         this.configRevision === this.lastTickConfigRevision
@@ -590,7 +644,104 @@ export class PollingScheduler {
     if (displayDateChanged) {
       this.alertEngine.resetCooldowns();
       this.loadRecentAlertsFromDb(displayDate);
+      this.loadPostCloseReconciledState(displayDate);
     }
+  }
+
+  private loadPostCloseReconciledState(tradeDate: string | null): void {
+    this.postCloseReconciledDate = tradeDate;
+    this.postCloseReconciledSymbols.clear();
+    this.postCloseReconcileAttempts.clear();
+    if (!tradeDate || this.stopped) return;
+
+    const stored = this.db.getSetting<PostCloseReconciledRecord>(SETTING_POST_CLOSE_RECONCILED);
+    if (stored && stored.tradeDate === tradeDate && Array.isArray(stored.symbols)) {
+      for (const sym of stored.symbols) {
+        if (typeof sym === 'string' && sym.trim()) {
+          this.postCloseReconciledSymbols.add(sym.trim().toUpperCase());
+        }
+      }
+    }
+  }
+
+  private isPostCloseReconcileReady(nowMs: number, phase: MarketPhase): boolean {
+    if (this.mode !== 'REPLAY' || !this.displayTradeDate || phase === 'LUNCH_BREAK') {
+      return false;
+    }
+    if (this.postCloseForceReconcilePending) {
+      return true;
+    }
+    if (phase === 'POST_MARKET') {
+      return getShanghaiParts(nowMs).secondsOfDay >= SEC_15_02;
+    }
+    // CLOSED_DAY 或 PRE_MARKET 复盘上一已完成交易日，终态数据已稳定可用
+    return true;
+  }
+
+  private needsPostCloseReconcileForSymbol(
+    symbol: string,
+    nowMs: number,
+    phase: MarketPhase
+  ): boolean {
+    if (!this.isPostCloseReconcileReady(nowMs, phase)) {
+      return false;
+    }
+    if (this.postCloseReconciledSymbols.has(symbol)) {
+      return false;
+    }
+    if (
+      !this.postCloseForceReconcilePending &&
+      (this.postCloseReconcileAttempts.get(symbol) ?? 0) >= MAX_AUTO_POST_CLOSE_RECONCILE_ATTEMPTS
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private shouldRunPostCloseSettleSnapshot(nowMs: number, phase: MarketPhase): boolean {
+    if (phase !== 'POST_MARKET' || !this.displayTradeDate) {
+      return false;
+    }
+    const { dateStr, secondsOfDay } = getShanghaiParts(nowMs);
+    if (dateStr !== this.displayTradeDate) {
+      return false;
+    }
+    return (
+      secondsOfDay >= SEC_15_00_SETTLE &&
+      secondsOfDay < SEC_15_02 &&
+      this.postCloseSettleSnapshotDoneDate !== this.displayTradeDate
+    );
+  }
+
+  private persistPostCloseReconciledSymbol(
+    symbol: string,
+    days: readonly IntradayDayData[],
+    nowMs: number,
+    phase: MarketPhase
+  ): void {
+    if (!this.displayTradeDate || this.stopped) return;
+    // 15:00:01–15:01:59 期间上游分时可能尚未含完整收盘集合竞价，不提前锁定已校准标记
+    if (phase === 'POST_MARKET' && getShanghaiParts(nowMs).secondsOfDay < SEC_15_02) {
+      return;
+    }
+    const matchedDay = days.find((d) => d.tradeDate === this.displayTradeDate);
+    if (!matchedDay || matchedDay.bars.length < TOTAL_DAY_BARS) {
+      return;
+    }
+    const hasClosingBar = matchedDay.bars.some((b) => b.minuteIndex === TOTAL_DAY_BARS - 1);
+    if (!hasClosingBar) {
+      return;
+    }
+
+    if (this.postCloseReconciledDate !== this.displayTradeDate) {
+      this.postCloseReconciledDate = this.displayTradeDate;
+      this.postCloseReconciledSymbols.clear();
+    }
+    this.postCloseReconciledSymbols.add(symbol);
+    this.db.setSetting<PostCloseReconciledRecord>(SETTING_POST_CLOSE_RECONCILED, {
+      tradeDate: this.displayTradeDate,
+      symbols: [...this.postCloseReconciledSymbols],
+    });
   }
 
   private loadRecentAlertsFromDb(tradeDate: string | null): void {
@@ -699,7 +850,7 @@ export class PollingScheduler {
     const monitoredSymbols = this.collectMonitoredSymbols(watchlistItems);
     const nameLookup = this.buildNameLookup(watchlistItems);
 
-    // 从连续交易阶段刚跨入午休或盘后时，补拉一次终态收盘快照捕获 11:30:03 / 15:00:03 集合竞价，再刷盘待闭合分钟
+    // 从连续交易阶段刚跨入午休或盘后时，补拉一次终态收盘快照捕获 11:30:xx / 15:00:xx 集合竞价，再刷盘待闭合分钟
     const justClosedSession =
       (prevPhase === 'MORNING_SESSION' && phase === 'LUNCH_BREAK') ||
       (prevPhase === 'AFTERNOON_SESSION' && phase === 'POST_MARKET');
@@ -707,11 +858,21 @@ export class PollingScheduler {
       await this.pollLiveSnapshots(monitoredSymbols, nameLookup, nowMs, prevPhase);
       if (this.stopped) return this.buildStoppedFallbackState();
       this.flushAllPendingBars();
+      if (phase === 'POST_MARKET' && secondsOfDay >= SEC_15_00_SETTLE && displayDate) {
+        this.postCloseSettleSnapshotDoneDate = displayDate;
+      }
+    } else if (this.shouldRunPostCloseSettleSnapshot(nowMs, phase)) {
+      // 15:00:15 收盘集合竞价二次结算补抓（仅执行 1 次），避免 15:00:01 瞬间尚未推送尾盘撮合额
+      await this.pollLiveSnapshots(monitoredSymbols, nameLookup, nowMs, 'AFTERNOON_SESSION');
+      if (this.stopped) return this.buildStoppedFallbackState();
+      this.flushAllPendingBars();
+      this.postCloseSettleSnapshotDoneDate = displayDate;
     }
 
-    // 4. 首次从 SQLite 加载内存缓存并按需补齐缺失的昨日 240 分钟与今日已过分钟
+    // 4. 首次从 SQLite 加载内存缓存并按需补齐缺失的昨日 240 分钟、今日已过分钟及盘后权威收盘终态
     await this.ensureIntradayBackfilled(monitoredSymbols, nowMs, phase);
     if (this.stopped) return this.buildStoppedFallbackState();
+    this.postCloseForceReconcilePending = false;
 
     // 5. 交易时段执行批量快照拉取与告警评估；非交易时段零高频请求，直接复盘
     if (mode === 'LIVE') {
@@ -1013,7 +1174,11 @@ export class PollingScheduler {
       if (phase === 'LUNCH_BREAK') {
         return todayList.length < MORNING_BARS;
       }
-      return todayList.length < TOTAL_DAY_BARS;
+      if (todayList.length < TOTAL_DAY_BARS) {
+        return true;
+      }
+      // 即使已落盘 240 根（如盘中快照拼接），盘后仍需用上游权威分时终态校准一次以补全 14:57–15:00 尾盘集合竞价
+      return this.needsPostCloseReconcileForSymbol(symbol, nowMs, phase);
     }
 
     const currentMinuteIndex = timestampToMinuteIndex(nowMs);
@@ -1050,13 +1215,19 @@ export class PollingScheduler {
       }
 
       const lastAttempt = this.lastBackfillAttemptAt.get(sym);
-      if (lastAttempt !== undefined && nowMs - lastAttempt < BACKFILL_RETRY_COOLDOWN_MS) {
+      if (
+        !this.postCloseForceReconcilePending &&
+        lastAttempt !== undefined &&
+        nowMs - lastAttempt < BACKFILL_RETRY_COOLDOWN_MS
+      ) {
         continue;
       }
       missing.push(sym);
     }
 
     if (missing.length === 0) return;
+
+    const isPostCloseReconcilePass = this.isPostCloseReconcileReady(nowMs, phase);
 
     // 限制并发度为 2、批次间间隔 150ms，避免触发上游限流（docs/DATA_SOURCES.md §5.2）
     const concurrency = 2;
@@ -1066,12 +1237,22 @@ export class PollingScheduler {
       await Promise.all(
         batch.map(async (sym) => {
           this.lastBackfillAttemptAt.set(sym, nowMs);
+          if (isPostCloseReconcilePass) {
+            this.postCloseReconcileAttempts.set(
+              sym,
+              (this.postCloseReconcileAttempts.get(sym) ?? 0) + 1
+            );
+          }
           const days = await this.fetchIntradayWithFallback(sym, 2);
           if (this.stopped) return;
           if (days && days.length > 0) {
             this.persistIntradayDays(days);
             this.intradaySourceBySymbol.set(sym, days[0].source);
+            this.lastUpdatedAt = nowMs;
             this.loadSymbolFromDb(sym);
+            if (isPostCloseReconcilePass) {
+              this.persistPostCloseReconciledSymbol(sym, days, nowMs, phase);
+            }
           }
         })
       );

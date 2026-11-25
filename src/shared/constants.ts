@@ -161,6 +161,8 @@ export const PRIMARY_RECOVERY_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 export const FAILOVER_FAILURE_THRESHOLD = 3;
 /** SQLite 中记录交易日历最近同步日期的 app_settings 键名 */
 export const SETTING_CALENDAR_SYNC_DATE = 'calendar.lastSyncedDate';
+/** SQLite 中记录最近一次已完成盘后收盘分时终态校正的标的集合 */
+export const SETTING_POST_CLOSE_RECONCILED = 'collector.postCloseReconciled';
 
 /** SQLite 滚动保留交易日数 */
 export const DEFAULT_RETENTION_TRADING_DAYS = 30;

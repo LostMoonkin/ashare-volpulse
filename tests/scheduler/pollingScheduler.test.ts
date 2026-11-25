@@ -1497,4 +1497,244 @@ describe('PollingScheduler', () => {
       db.close();
     }
   });
+
+  it('reconciles missing closing auction turnover in existing 240-bar post-market cache, persists flag, and supports forced refresh', async () => {
+    const db = new AppDatabase(':memory:');
+    try {
+      db.upsertTradingDays([
+        { date: '2026-11-24', isOpen: true },
+        { date: '2026-11-25', isOpen: true },
+      ]);
+      db.setSetting('calendar.lastSyncedDate', '2026-11-25');
+
+      // 模拟盘中已写入 240 根 bar，但 minuteIndex=239 停留在 14:59 竞价前（barTurnover=0，缺失尾盘竞价）
+      for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000680.SH']) {
+        db.upsertIntradayBars(
+          makeIntradayDay({ symbol: sym, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 2e9 }).bars
+        );
+        const staleToday = makeIntradayDay({
+          symbol: sym,
+          tradeDate: '2026-11-25',
+          barCount: 240,
+          baseTurnoverPerMin: 2e9,
+        }).bars;
+        const prev238 = staleToday[238];
+        staleToday[239] = {
+          ...staleToday[239],
+          cumTurnover: prev238.cumTurnover,
+          barTurnover: 0,
+        };
+        db.upsertIntradayBars(staleToday);
+      }
+
+      const nowMs = shanghaiToTimestampMs('2026-11-25', 17, 4, 0);
+      let authoritativeClosingExtra = 9e9; // 模拟尾盘集合竞价 +90 亿/侧
+      const intradayFetchSpy = vi.fn(async (symbol: string) => {
+        const dayToday = makeIntradayDay({
+          symbol,
+          tradeDate: '2026-11-25',
+          barCount: 240,
+          baseTurnoverPerMin: 2e9,
+        });
+        const prev238 = dayToday.bars[238];
+        dayToday.bars[239] = {
+          ...dayToday.bars[239],
+          cumTurnover: prev238.cumTurnover + authoritativeClosingExtra,
+          barTurnover: authoritativeClosingExtra,
+        };
+        return [
+          dayToday,
+          makeIntradayDay({
+            symbol,
+            tradeDate: '2026-11-24',
+            barCount: 240,
+            baseTurnoverPerMin: 2e9,
+          }),
+        ];
+      });
+
+      const primary = createFakeProvider('tencent', {
+        fetchIntradayMinutes: intradayFetchSpy,
+      });
+
+      const scheduler1 = new PollingScheduler({
+        database: db,
+        primarySnapshotProvider: primary,
+        secondarySnapshotProvider: createFakeProvider('sina'),
+        hithinkProvider: createFakeHithink({ configured: false }),
+        primaryIntradayProvider: primary,
+        secondaryIntradayProvider: createFakeProvider('eastmoney'),
+        nowFn: () => nowMs,
+        sleepFn: async () => {},
+        backfillDelayMs: 0,
+      });
+
+      // 1. 盘后 17:04 首次启动：虽然库里已有 240 根，但未完成盘后终态校正 → 自动自愈补齐 15:00 尾盘竞价
+      const st1 = await scheduler1.tickOnce();
+      expect(st1.status.phase).toBe('POST_MARKET');
+      expect(intradayFetchSpy).toHaveBeenCalledTimes(5);
+      const shBar239 = db.getIntradayBars('000001.SH', '2026-11-25').find((b) => b.minuteIndex === 239);
+      expect(shBar239?.barTurnover).toBe(9e9);
+      expect(st1.status.lastUpdatedAt).toBe(nowMs);
+
+      // 2. 重启新的调度器实例：已持久化盘后终态校正标记 → 零多余分时请求
+      intradayFetchSpy.mockClear();
+      const scheduler2 = new PollingScheduler({
+        database: db,
+        primarySnapshotProvider: primary,
+        secondarySnapshotProvider: createFakeProvider('sina'),
+        hithinkProvider: createFakeHithink({ configured: false }),
+        primaryIntradayProvider: primary,
+        secondaryIntradayProvider: createFakeProvider('eastmoney'),
+        nowFn: () => nowMs,
+        sleepFn: async () => {},
+        backfillDelayMs: 0,
+      });
+      await scheduler2.tickOnce();
+      expect(intradayFetchSpy).not.toHaveBeenCalled();
+
+      // 3. 用户手动点击「立即刷新」(forceReconcile: true) → 强制重新校对并更新终态
+      authoritativeClosingExtra = 9.5e9;
+      await scheduler2.refreshNow({ forceReconcile: true });
+      expect(intradayFetchSpy).toHaveBeenCalledTimes(5);
+      const updatedShBar239 = db
+        .getIntradayBars('000001.SH', '2026-11-25')
+        .find((b) => b.minuteIndex === 239);
+      expect(updatedShBar239?.barTurnover).toBe(9.5e9);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('captures delayed closing auction at 15:00:15 settle tick and reconciles authoritative intraday at 15:02:00', async () => {
+    vi.useFakeTimers();
+    const db = new AppDatabase(':memory:');
+    try {
+      db.upsertTradingDays([
+        { date: '2026-11-24', isOpen: true },
+        { date: '2026-11-25', isOpen: true },
+      ]);
+      db.setSetting('calendar.lastSyncedDate', '2026-11-25');
+
+      for (const sym of ['000001.SH', '399106.SZ', '399001.SZ', '399006.SZ', '000680.SH']) {
+        db.upsertIntradayBars(
+          makeIntradayDay({ symbol: sym, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 1e9 }).bars
+        );
+        db.upsertIntradayBars(
+          makeIntradayDay({ symbol: sym, tradeDate: '2026-11-25', barCount: 239, baseTurnoverPerMin: 1e9 }).bars
+        );
+        db.upsertAuctionSnapshot({
+          symbol: sym,
+          tradeDate: '2026-11-25',
+          openPrice: 3500,
+          auctionTurnover: 1e9,
+          capturedAt: 1,
+        });
+      }
+
+      let nowMs = shanghaiToTimestampMs('2026-11-25', 14, 59, 57);
+      let snapTs = nowMs;
+      let snapTurnover = 240e9; // 14:59 未撮合前
+
+      const snapSpy = vi.fn(async (symbols: readonly string[]) => {
+        const m = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          m.set(
+            s,
+            makeSnapshot({
+              symbol: s,
+              tradeDate: '2026-11-25',
+              timestampMs: snapTs,
+              turnover: snapTurnover,
+            })
+          );
+        }
+        return m;
+      });
+
+      const intradaySpy = vi.fn(async (symbol: string) => {
+        const dayToday = makeIntradayDay({
+          symbol,
+          tradeDate: '2026-11-25',
+          barCount: 240,
+          baseTurnoverPerMin: 1e9,
+        });
+        const prev238 = dayToday.bars[238];
+        dayToday.bars[239] = {
+          ...dayToday.bars[239],
+          cumTurnover: 258e9,
+          barTurnover: 258e9 - prev238.cumTurnover,
+        };
+        return [
+          dayToday,
+          makeIntradayDay({
+            symbol,
+            tradeDate: '2026-11-24',
+            barCount: 240,
+            baseTurnoverPerMin: 1e9,
+          }),
+        ];
+      });
+
+      const primary = createFakeProvider('tencent', {
+        fetchBatchSnapshots: snapSpy,
+        fetchIntradayMinutes: intradaySpy,
+      });
+
+      const scheduler = new PollingScheduler({
+        database: db,
+        primarySnapshotProvider: primary,
+        secondarySnapshotProvider: createFakeProvider('sina'),
+        hithinkProvider: createFakeHithink({ configured: false }),
+        primaryIntradayProvider: primary,
+        secondaryIntradayProvider: createFakeProvider('eastmoney'),
+        nowFn: () => nowMs,
+        sleepFn: async () => {},
+        backfillDelayMs: 0,
+      });
+
+      // 14:59:57 启动
+      await scheduler.start();
+      expect(snapSpy).toHaveBeenCalledTimes(1);
+
+      // 15:00:01 刚跨收盘：交易所尚未推完尾盘竞价，快照仍停留在 240e9
+      nowMs = shanghaiToTimestampMs('2026-11-25', 15, 0, 1);
+      snapTs = shanghaiToTimestampMs('2026-11-25', 14, 59, 59);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(
+        db.getIntradayBars('000001.SH', '2026-11-25').find((b) => b.minuteIndex === 239)?.cumTurnover
+      ).toBe(240e9);
+      expect(intradaySpy).not.toHaveBeenCalled();
+
+      // 15:00:15 收盘结算补抓点自动唤醒：拿到延迟推送的 15:00:12 终态快照 255e9
+      nowMs = shanghaiToTimestampMs('2026-11-25', 15, 0, 15);
+      snapTs = shanghaiToTimestampMs('2026-11-25', 15, 0, 12);
+      snapTurnover = 255e9;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(
+        db.getIntradayBars('000001.SH', '2026-11-25').find((b) => b.minuteIndex === 239)?.cumTurnover
+      ).toBe(255e9);
+
+      // 15:02:00 权威分时终态校正点自动唤醒：拉取权威 240 根分时校准为 258e9 并落盘标记
+      const snapCallsAt150015 = snapSpy.mock.calls.length;
+      nowMs = shanghaiToTimestampMs('2026-11-25', 15, 2, 0);
+      await vi.advanceTimersByTimeAsync(106_000);
+      expect(intradaySpy).toHaveBeenCalledTimes(5);
+      expect(snapSpy).toHaveBeenCalledTimes(snapCallsAt150015);
+      expect(
+        db.getIntradayBars('000001.SH', '2026-11-25').find((b) => b.minuteIndex === 239)?.cumTurnover
+      ).toBe(258e9);
+
+      // 之后再推进 10 分钟：彻底零网络请求
+      nowMs = shanghaiToTimestampMs('2026-11-25', 15, 12, 0);
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(intradaySpy).toHaveBeenCalledTimes(5);
+      expect(snapSpy).toHaveBeenCalledTimes(snapCallsAt150015);
+
+      scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+      db.close();
+    }
+  });
 });
