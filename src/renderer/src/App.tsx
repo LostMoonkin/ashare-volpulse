@@ -1,113 +1,13 @@
-import { useEffect, useState } from 'react';
-import type { BootstrapState, MarketDashboardState } from '../../shared/types';
+import './styles/theme.css';
+import { DetailView } from './detail/DetailView';
+import { HudView } from './hud/HudView';
+
+function resolveCurrentView(): 'hud' | 'detail' {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('view') === 'detail' ? 'detail' : 'hud';
+}
 
 export function App() {
-  const [state, setState] = useState<BootstrapState | null>(null);
-  const [market, setMarket] = useState<MarketDashboardState | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    window.api
-      .getBootstrapState()
-      .then(setState)
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
-
-    window.api
-      .getMarketState()
-      .then((initial) => {
-        if (initial) setMarket(initial);
-      })
-      .catch(() => {});
-
-    const unsubscribe = window.api.onMarketStateUpdated((next) => {
-      setMarket(next);
-    });
-    return () => {
-      unsubscribe();
-    };
-  }, []);
-
-  return (
-    <main
-      style={{
-        padding: '20px',
-        minHeight: '100vh',
-        boxSizing: 'border-box',
-        background: '#0e1117',
-        color: '#e6edf3',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '12px',
-      }}
-    >
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <h1 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>A 股实时能量看板</h1>
-        <span style={{ fontSize: '12px', color: '#8b949e' }}>Phase 3 采集调度</span>
-      </header>
-
-      {error && (
-        <div
-          style={{
-            padding: '10px 12px',
-            borderRadius: '6px',
-            background: 'rgba(248, 81, 73, 0.12)',
-            border: '1px solid rgba(248, 81, 73, 0.4)',
-            fontSize: '12px',
-            color: '#ff7b72',
-          }}
-        >
-          初始化失败：{error}
-        </div>
-      )}
-
-      {state ? (
-        <section
-          style={{
-            padding: '12px',
-            borderRadius: '8px',
-            background: '#161b22',
-            border: '1px solid #30363d',
-            fontSize: '12px',
-            lineHeight: 1.8,
-          }}
-        >
-          <div>Electron：{state.electronVersion}（Node {state.nodeVersion}）</div>
-          <div>
-            SQLite 本地库：{state.dbReady ? '已就绪（node:sqlite）' : '未就绪'} · 交易日历{' '}
-            {state.retention.tradingDaysCount} 天 · 自选股 {state.retention.watchlistCount} 只
-          </div>
-          <div>
-            同花顺 API Key：
-            {state.secretStatus.configured
-              ? `已配置（来源：${state.secretStatus.source}）`
-              : '未配置'}
-          </div>
-          {market && (
-            <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #30363d' }}>
-              <div>
-                采集态：{market.status.mode} / {market.status.phase} · 数据源：
-                {market.status.activeSnapshotProvider ?? market.status.activeIntradayProvider ?? '—'}
-                {market.status.lastLatencyMs !== null ? ` (${market.status.lastLatencyMs}ms)` : ''}
-              </div>
-              <div>
-                日历来源：{market.status.calendarSource}
-                {market.status.degraded ? ' · 降级' : ''}
-                {market.status.stale ? ' · 陈旧' : ''}
-              </div>
-              <div>
-                两市总成交额：
-                {market.marketTotal.cumTurnover !== null
-                  ? `${(market.marketTotal.cumTurnover / 1e8).toFixed(2)} 亿`
-                  : '不可用（降级）'}
-              </div>
-            </div>
-          )}
-        </section>
-      ) : (
-        !error && <div style={{ fontSize: '12px', color: '#8b949e' }}>正在加载运行状态…</div>
-      )}
-    </main>
-  );
+  const view = resolveCurrentView();
+  return view === 'detail' ? <DetailView /> : <HudView />;
 }

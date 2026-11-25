@@ -231,6 +231,59 @@ export interface AlertEventRow extends AlertEventInput {
   id: number;
 }
 
+/** 经主进程告警通道广播给渲染进程的完整告警载荷 */
+export interface AlertDispatchPayload extends AlertEventRow {
+  /** 是否为开发态模拟测试事件 */
+  isSimulated: boolean;
+  /** 派发瞬间应用是否处于静音状态（静音时渲染进程不播放提示音） */
+  muted: boolean;
+}
+
+/** 窗口左上角屏幕坐标 */
+export interface WindowPosition {
+  x: number;
+  y: number;
+}
+
+/** 详情浮层页签 */
+export type DetailTab = 'chart' | 'watchlist' | 'alerts' | 'settings';
+
+/** 打开详情浮层的可选参数 */
+export interface OpenDetailOptions {
+  symbol?: string;
+  tab?: DetailTab;
+}
+
+/** 持久化在 app_settings 中的桌面外壳设置 */
+export interface DesktopShellSettings {
+  hudPosition: WindowPosition | null;
+  hudOpacity: number;
+  alwaysOnTop: boolean;
+  muted: boolean;
+  bossKey: string;
+  autoLaunch: boolean;
+}
+
+/** 全局老板键注册状态 */
+export interface BossKeyStatus {
+  accelerator: string;
+  registered: boolean;
+  conflictMessage: string | null;
+}
+
+/** 桌面外壳运行态（同步给 HUD 与详情浮层） */
+export interface DesktopShellState {
+  settings: DesktopShellSettings;
+  bossKeyStatus: BossKeyStatus;
+  hudVisible: boolean;
+  detailVisible: boolean;
+  activeDetailSymbol: string;
+  activeDetailTab: DetailTab;
+  /** 每次主进程主动打开/导航详情浮层时递增，避免普通设置同步覆盖用户当前页签 */
+  detailFocusSeq: number;
+  isDev: boolean;
+}
+
 /** 30 交易日滚动清理执行结果 */
 export interface PruneResult {
   pruned: boolean;

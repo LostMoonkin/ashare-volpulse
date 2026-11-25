@@ -1,13 +1,24 @@
 import path from 'node:path';
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { app, ipcMain, safeStorage } from 'electron';
 import { getShanghaiParts } from '../core/tradingClock';
 import {
+  APP_USER_MODEL_ID,
   DATABASE_FILENAME,
   DEFAULT_RETENTION_TRADING_DAYS,
   ENCRYPTED_KEY_FILENAME,
+  MARKET_TOTAL_SYMBOL,
 } from '../shared/constants';
 import { IPC_CHANNELS } from '../shared/ipc';
-import type { AlertEventInput, BootstrapState, MarketDashboardState } from '../shared/types';
+import type {
+  AlertDirection,
+  AlertEventInput,
+  BootstrapState,
+  DesktopShellSettings,
+  DesktopShellState,
+  MarketDashboardState,
+  OpenDetailOptions,
+} from '../shared/types';
+import { AlertDispatcher } from './alerts';
 import {
   EastmoneyProvider,
   HithinkProvider,
@@ -17,67 +28,126 @@ import {
 import { PollingScheduler } from './scheduler';
 import { AppDatabase } from './storage/database';
 import { SecretStore } from './storage/secretStore';
+import { BossKeyManager, TrayManager } from './tray';
+import {
+  ShellSettingsStore,
+  WindowManager,
+  resolvePreloadPath,
+  resolveRendererHtmlPath,
+} from './windows';
 
-let mainWindow: BrowserWindow | null = null;
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+
+const isDevMode = !app.isPackaged;
+const singleInstanceLock = app.requestSingleInstanceLock();
+
 let database: AppDatabase | null = null;
 let secretStore: SecretStore | null = null;
+let settingsStore: ShellSettingsStore | null = null;
+let shellSettings: DesktopShellSettings | null = null;
+let windowManager: WindowManager | null = null;
+let trayManager: TrayManager | null = null;
+let bossKeyManager: BossKeyManager | null = null;
+let alertDispatcher: AlertDispatcher | null = null;
 let scheduler: PollingScheduler | null = null;
 
-function broadcastMarketState(state: MarketDashboardState): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(IPC_CHANNELS.MARKET_STATE_UPDATED, state);
+function buildShellState(): DesktopShellState {
+  if (!shellSettings || !windowManager || !bossKeyManager) {
+    throw new Error('Desktop shell services are not initialized.');
   }
+  return {
+    settings: { ...shellSettings },
+    bossKeyStatus: bossKeyManager.getStatus(),
+    hudVisible: windowManager.isHudVisible(),
+    detailVisible: windowManager.isDetailVisible(),
+    activeDetailSymbol: windowManager.getActiveDetailSymbol(),
+    activeDetailTab: windowManager.getActiveDetailTab(),
+    detailFocusSeq: windowManager.getDetailFocusSeq(),
+    isDev: isDevMode,
+  };
+}
+
+function syncShellState(): DesktopShellState {
+  const state = buildShellState();
+  trayManager?.updateShellState(state);
+  windowManager?.broadcast(IPC_CHANNELS.SHELL_STATE_UPDATED, state);
+  return state;
+}
+
+function broadcastMarketState(state: MarketDashboardState): void {
+  trayManager?.updateMarketState(state);
+  windowManager?.broadcast(IPC_CHANNELS.MARKET_STATE_UPDATED, state);
 }
 
 function handleAlertTriggered(event: AlertEventInput): void {
-  database?.insertAlertEvent(event);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(IPC_CHANNELS.ALERT_TRIGGERED, event);
+  alertDispatcher?.dispatch(event);
+}
+
+function applyAutoLaunchSetting(enabled: boolean): void {
+  if (process.platform !== 'win32' && process.platform !== 'darwin') return;
+  try {
+    if (app.isPackaged) {
+      app.setLoginItemSettings({ openAtLogin: enabled });
+    } else if (process.platform === 'win32') {
+      const appArg = process.argv[1] ? path.resolve(process.argv[1]) : process.cwd();
+      app.setLoginItemSettings({
+        openAtLogin: enabled,
+        path: process.execPath,
+        args: [appArg],
+      });
+    }
+  } catch (err: unknown) {
+    console.warn(
+      '[main] setLoginItemSettings failed:',
+      err instanceof Error ? err.message : String(err)
+    );
   }
 }
 
-function createMainWindow(): BrowserWindow {
-  const win = new BrowserWindow({
-    width: 420,
-    height: 300,
-    minWidth: 360,
-    minHeight: 240,
-    show: false,
-    title: 'A 股实时能量看板',
-    backgroundColor: '#0e1117',
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-
-  win.once('ready-to-show', () => {
-    win.show();
-    if (!app.isPackaged) {
-      const smokeExitMs = Number(process.env.A_SHARE_SMOKE_EXIT_MS || '0');
-      if (smokeExitMs > 0) {
-        setTimeout(() => {
-          app.quit();
-        }, smokeExitMs);
-      }
-    }
-  });
-
-  win.on('closed', () => {
-    if (mainWindow === win) {
-      mainWindow = null;
-    }
-  });
-
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void win.loadURL(process.env.ELECTRON_RENDERER_URL);
-  } else {
-    void win.loadFile(path.join(__dirname, '../renderer/index.html'));
+function updateAlwaysOnTop(alwaysOnTop: boolean): DesktopShellState {
+  if (!settingsStore || !shellSettings || !windowManager) {
+    throw new Error('Desktop shell is not ready.');
   }
+  const normalized = settingsStore.setAlwaysOnTop(alwaysOnTop);
+  shellSettings = { ...shellSettings, alwaysOnTop: normalized };
+  windowManager.applyAlwaysOnTop(normalized);
+  return syncShellState();
+}
 
-  return win;
+function updateMuted(muted: boolean): DesktopShellState {
+  if (!settingsStore || !shellSettings) {
+    throw new Error('Desktop shell is not ready.');
+  }
+  const normalized = settingsStore.setMuted(muted);
+  shellSettings = { ...shellSettings, muted: normalized };
+  return syncShellState();
+}
+
+function updateHudOpacity(opacity: number): DesktopShellState {
+  if (!settingsStore || !shellSettings || !windowManager) {
+    throw new Error('Desktop shell is not ready.');
+  }
+  const clamped = settingsStore.setHudOpacity(opacity);
+  shellSettings = { ...shellSettings, hudOpacity: clamped };
+  windowManager.applyOpacity(clamped);
+  return syncShellState();
+}
+
+function updateAutoLaunch(enabled: boolean): DesktopShellState {
+  if (!settingsStore || !shellSettings) {
+    throw new Error('Desktop shell is not ready.');
+  }
+  const normalized = settingsStore.setAutoLaunch(enabled);
+  shellSettings = { ...shellSettings, autoLaunch: normalized };
+  applyAutoLaunchSetting(normalized);
+  return syncShellState();
+}
+
+function requestQuit(): void {
+  windowManager?.prepareForQuit();
+  app.quit();
 }
 
 function registerIpcHandlers(): void {
@@ -118,6 +188,90 @@ function registerIpcHandlers(): void {
       return scheduler.searchTickers(keyword, limit);
     }
   );
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_GET_STATE, (): DesktopShellState => {
+    return buildShellState();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SHELL_OPEN_DETAIL,
+    (_event, options?: OpenDetailOptions): DesktopShellState => {
+      windowManager?.openDetail(options);
+      return buildShellState();
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_HIDE_DETAIL, (): DesktopShellState => {
+    windowManager?.hideDetail();
+    return buildShellState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_HIDE_HUD, (): DesktopShellState => {
+    windowManager?.hideHud();
+    return buildShellState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_SET_OPACITY, (_event, opacity: number): DesktopShellState => {
+    return updateHudOpacity(opacity);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SHELL_SET_ALWAYS_ON_TOP,
+    (_event, alwaysOnTop: boolean): DesktopShellState => {
+      return updateAlwaysOnTop(alwaysOnTop);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_SET_MUTED, (_event, muted: boolean): DesktopShellState => {
+    return updateMuted(muted);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_SET_BOSS_KEY, (_event, accelerator: string) => {
+    if (!bossKeyManager || !settingsStore || !shellSettings) {
+      throw new Error('BossKeyManager is not initialized.');
+    }
+    const result = bossKeyManager.rebind(accelerator);
+    if (result.success && result.committedAccelerator) {
+      const saved = settingsStore.setBossKey(result.committedAccelerator);
+      shellSettings = { ...shellSettings, bossKey: saved };
+    }
+    syncShellState();
+    return result.status;
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SHELL_SET_AUTO_LAUNCH,
+    (_event, enabled: boolean): DesktopShellState => {
+      return updateAutoLaunch(enabled);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.ALERT_GET_RECENT,
+    (_event, tradeDate?: string, limit?: number) => {
+      if (!database) return [];
+      const safeLimit =
+        typeof limit === 'number' && Number.isFinite(limit)
+          ? Math.max(1, Math.min(500, Math.round(limit)))
+          : 100;
+      return database.getAlertEvents(tradeDate, safeLimit);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.ALERT_SIMULATE,
+    (_event, direction: AlertDirection, symbol?: string) => {
+      if (!alertDispatcher) {
+        throw new Error('AlertDispatcher is not initialized.');
+      }
+      if (direction !== 'SURGE' && direction !== 'SHRINK') {
+        throw new Error(`Invalid alert direction: ${String(direction)}`);
+      }
+      return alertDispatcher.dispatchSimulated(direction, {
+        symbol: symbol ?? MARKET_TOTAL_SYMBOL,
+      });
+    }
+  );
 }
 
 function initServices(): void {
@@ -132,6 +286,84 @@ function initServices(): void {
   secretStore = new SecretStore({
     encryptedFilePath: encryptedKeyPath,
     safeStorage,
+  });
+
+  settingsStore = new ShellSettingsStore(database);
+  shellSettings = settingsStore.load();
+
+  windowManager = new WindowManager({
+    preloadPath: resolvePreloadPath(__dirname),
+    rendererHtmlPath: resolveRendererHtmlPath(__dirname),
+    rendererDevUrl: process.env.ELECTRON_RENDERER_URL,
+    initialSettings: shellSettings,
+    onHudPositionCommitted: (pos) => {
+      if (!settingsStore || !shellSettings) return;
+      const saved = settingsStore.setHudPosition(pos);
+      shellSettings = { ...shellSettings, hudPosition: saved };
+      syncShellState();
+    },
+    onStateChanged: () => {
+      if (shellSettings && windowManager && bossKeyManager) {
+        syncShellState();
+      }
+    },
+    onWindowReady: (win) => {
+      if (win.isDestroyed()) return;
+      if (shellSettings && windowManager && bossKeyManager) {
+        win.webContents.send(IPC_CHANNELS.SHELL_STATE_UPDATED, buildShellState());
+      }
+      const latestMarket = scheduler?.getLatestState();
+      if (latestMarket) {
+        win.webContents.send(IPC_CHANNELS.MARKET_STATE_UPDATED, latestMarket);
+      }
+    },
+  });
+
+  alertDispatcher = new AlertDispatcher({
+    database,
+    isMuted: () => Boolean(shellSettings?.muted),
+    broadcastAlert: (payload) => {
+      windowManager?.broadcast(IPC_CHANNELS.ALERT_TRIGGERED, payload);
+    },
+    onNotificationClick: (symbol) => {
+      windowManager?.openDetail({ symbol, tab: 'alerts' });
+    },
+    allowSimulation: isDevMode,
+  });
+
+  bossKeyManager = new BossKeyManager({
+    onTrigger: () => {
+      windowManager?.toggleBossKeyVisibility();
+    },
+    onConflict: (status) => {
+      alertDispatcher?.notifyBossKeyConflict(status);
+    },
+  });
+
+  trayManager = new TrayManager({
+    onToggleHud: () => windowManager?.toggleHud(),
+    onToggleDetail: () => windowManager?.toggleDetail(),
+    onToggleAlwaysOnTop: (next) => {
+      updateAlwaysOnTop(next);
+    },
+    onToggleMuted: (next) => {
+      updateMuted(next);
+    },
+    onToggleAutoLaunch: (next) => {
+      updateAutoLaunch(next);
+    },
+    onRefreshNow: () => {
+      void scheduler?.refreshNow();
+    },
+    onOpenSettings: () => {
+      windowManager?.openDetail({ tab: 'settings' });
+    },
+    onSimulateAlert: isDevMode
+      ? (direction) => {
+          alertDispatcher?.dispatchSimulated(direction);
+        }
+      : undefined,
+    onQuit: requestQuit,
   });
 
   const tencentProvider = new TencentProvider();
@@ -151,36 +383,58 @@ function initServices(): void {
   });
 }
 
-app.whenReady().then(() => {
-  initServices();
-  registerIpcHandlers();
-  mainWindow = createMainWindow();
-  void scheduler?.start().catch((err: unknown) => {
-    console.error(
-      '[main] PollingScheduler start failed:',
-      err instanceof Error ? err.message : String(err)
-    );
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    windowManager?.showHud();
   });
 
-  app.on('activate', () => {
-    if (!mainWindow && BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createMainWindow();
-    } else {
-      mainWindow?.focus();
+  app.whenReady().then(() => {
+    initServices();
+    registerIpcHandlers();
+
+    if (shellSettings) {
+      bossKeyManager?.registerInitial(shellSettings.bossKey);
+      if (shellSettings.autoLaunch) {
+        applyAutoLaunchSetting(true);
+      }
     }
+
+    windowManager?.createHudWindow();
+    trayManager?.init(buildShellState(), scheduler?.getLatestState() ?? null);
+
+    void scheduler?.start().catch((err: unknown) => {
+      console.error(
+        '[main] PollingScheduler start failed:',
+        err instanceof Error ? err.message : String(err)
+      );
+    });
+
+    app.on('activate', () => {
+      windowManager?.showHud();
+    });
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+  // 关闭窗口仅隐藏至托盘，不自动退出应用；只有托盘「退出」触发真正退出
+  app.on('window-all-closed', () => {
+    // 刻意保持驻留系统托盘
+  });
 
-app.on('before-quit', () => {
-  scheduler?.stop();
-  scheduler = null;
-  database?.close();
-  database = null;
-  mainWindow = null;
-});
+  app.on('before-quit', () => {
+    windowManager?.prepareForQuit();
+  });
+
+  app.on('will-quit', () => {
+    bossKeyManager?.unregister();
+    bossKeyManager = null;
+    trayManager?.destroy();
+    trayManager = null;
+    scheduler?.stop();
+    scheduler = null;
+    windowManager?.destroyAll();
+    windowManager = null;
+    database?.close();
+    database = null;
+  });
+}
