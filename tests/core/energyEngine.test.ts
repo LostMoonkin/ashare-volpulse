@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_PREDICTION_PRIOR_STRENGTH,
+  buildPredictionProfile,
+  computeBayesianFullDayPrediction,
   computeOlsSlope,
   evaluateEnergy,
   type MinuteTurnoverPoint,
@@ -45,11 +48,101 @@ describe('energyEngine', () => {
     expect(m.cumDiff).toBeCloseTo(150, 6);
     expect(m.cumRatio).toBeCloseTo(150 / 1100, 6);
     expect(m.cumRatioPct).toBeCloseTo((150 / 1100) * 100, 6);
-    expect(m.predictedFullDayTurnover).toBeCloseTo(24_000 * (1250 / 1100), 6);
+
+    // 贝叶斯收缩全天预测解析校验：w = 1100/24000, r = 1250/1100, α = w / (w + 0.12)
+    const w = 1100 / 24_000;
+    const alpha = w / (w + DEFAULT_PREDICTION_PRIOR_STRENGTH);
+    const expectedPred = 1250 + (alpha * (1250 / 1100) + (1 - alpha)) * (24_000 - 1100);
+    expect(m.predictedFullDayTurnover).toBeCloseTo(expectedPred, 6);
     expect(m.volumeState).toBe('EXPANDING');
     expect(m.windowMultiple).toBeCloseTo(1.3, 6);
     expect(m.windowDeviationPct).toBeCloseTo(30.0, 6);
     expect(m.slope).toBeCloseTo(7.0, 6);
+  });
+
+  it('stabilizes early-open full-day prediction with multi-day share profile and Bayesian shrinkage', () => {
+    // 1. 构造 5 个历史完整交易日（全天均为 10,000）：
+    //    前 4 天正常开盘（09:30 占比 5%）；昨天（第 5 天）异常高开（09:30 占比 10%）
+    const makeDay = (m0Share: number, fullDay = 10_000): MinuteTurnoverPoint[] => {
+      const bars: MinuteTurnoverPoint[] = [];
+      const m0 = fullDay * m0Share;
+      const step = (fullDay - m0) / 239;
+      for (let m = 0; m < 240; m++) {
+        bars.push({
+          minuteIndex: m,
+          cumTurnover: m === 0 ? m0 : m0 + step * m,
+        });
+      }
+      return bars;
+    };
+
+    const normalDay = makeDay(0.05);
+    const spikyPrevDay = makeDay(0.1);
+    const profile = buildPredictionProfile([
+      { bars: normalDay, auctionTurnover: 150 },
+      { bars: normalDay, auctionTurnover: 150 },
+      { bars: normalDay, auctionTurnover: 150 },
+      { bars: normalDay, auctionTurnover: 150 },
+      { bars: spikyPrevDay, auctionTurnover: 300 },
+      // 缺收盘的不完整日应自动忽略，不污染模板
+      { bars: normalDay.slice(0, 100), auctionTurnover: 150 },
+    ]);
+
+    expect(profile).not.toBeNull();
+    expect(profile!.sampleDays).toBe(5);
+    expect(profile!.avgFullDayTurnover).toBeCloseTo(10_000, 6);
+    // 5 日平均 09:30 占比 = (4*0.05 + 0.10)/5 = 0.06
+    expect(profile!.minuteShares.get(0)).toBeCloseTo(0.06, 6);
+    expect(profile!.minuteShares.get(239)).toBe(1);
+
+    // 今日开盘 09:30 成交 560（正常偏略低，相对昨日高开仅 0.56x，传统单日外推会腰斩到 5,600）
+    const withProfile = evaluateEnergy({
+      todaySeries: [{ minuteIndex: 0, cumTurnover: 560 }],
+      prevSeries: spikyPrevDay,
+      minuteIndex: 0,
+      elapsedSeconds: 60,
+      prevFullDayTurnover: 10_000,
+      predictionProfile: profile,
+    });
+    // 结合 5 日占比模板（期望 600，r=560/600=0.933x）+ 贝叶斯收缩，预测稳健落在 9,700+，彻底避免腰斩！
+    expect(withProfile.predictedFullDayTurnover!).toBeGreaterThan(9500);
+    expect(withProfile.predictedFullDayTurnover!).toBeLessThan(10_000);
+
+    // 即使只有单日模板（无多日 profile），贝叶斯收缩也避免 0.56x 直接把全天预测腰斩到 5,600
+    const singleDayShrunk = evaluateEnergy({
+      todaySeries: [{ minuteIndex: 0, cumTurnover: 560 }],
+      prevSeries: spikyPrevDay,
+      minuteIndex: 0,
+      elapsedSeconds: 60,
+      prevFullDayTurnover: 10_000,
+    });
+    expect(singleDayShrunk.predictedFullDayTurnover!).toBeGreaterThan(7500);
+
+    // 2. 边界性质校验：平量无偏、收盘零误差、λ=0 退化为纯等比外推
+    expect(
+      computeBayesianFullDayPrediction({
+        todayCumTurnover: 600,
+        baselineFullDayTurnover: 10_000,
+        alignedShare: 0.06,
+      })
+    ).toBeCloseTo(10_000, 6);
+
+    expect(
+      computeBayesianFullDayPrediction({
+        todayCumTurnover: 12_345,
+        baselineFullDayTurnover: 10_000,
+        alignedShare: 1,
+      })
+    ).toBeCloseTo(12_345, 6);
+
+    expect(
+      computeBayesianFullDayPrediction({
+        todayCumTurnover: 560,
+        baselineFullDayTurnover: 10_000,
+        alignedShare: 0.1,
+        priorStrength: 0,
+      })
+    ).toBeCloseTo(5600, 6);
   });
 
   it('eliminates false opening dip from heavy auction surge and avoids afternoon large-base damping', () => {

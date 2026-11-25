@@ -2,15 +2,15 @@
  * 统一能量计算引擎（纯 TypeScript，零 IO）
  *
  * 适用于沪深两市聚合（MARKET_TOTAL）、四大核心指数及任意自选个股。
- * 所有数学公式严格对齐 docs/PLAN.md §2.3（方案 A：边际量比归一化）：
+ * 所有数学公式严格对齐 docs/PLAN.md §2.3：
  * - 未闭合分钟线性插值对齐昨日同期：A_prev_aligned(t) = A_prev(t-1) + (s / 60) * Δa_prev(t)
  * - 同比差额 ΔA(t) = A_today(t) - A_prev_aligned(t)
  * - 同比变化率 R(t) = ΔA(t) / A_prev_aligned(t)（仅当分母 > 0）
- * - 全天预测成交额 Â_full(t) = A_prev_full * (A_today(t) / A_prev_aligned(t))
+ * - 全天预测成交额（多日分时占比模板 + 剩余时段贝叶斯收缩）：
+ *   Â_full(t) = A_today(t) + (α(t) * r(t) + (1 - α(t))) * Ā_full * (1 - w(t))，α(t) = w(t) / (w(t) + λ)
  * - 放/平/缩量状态：R(t)*100 >= +5% 放量，<= -5% 缩量，其余平量，不可计算为 UNAVAILABLE
- * - 滚动区间增量倍数 M_W(t) = (A_today(t) - A_today(t-W)) / (A_prev_aligned(t) - A_prev(t-W))
- *   与滚动边际量比偏离 D_W(t) = (M_W(t) - 1) * 100%（k ∈ [1, W-1] 使用纯连续竞价前缀 A(k)-A(0)）
- * - 边际量比趋势斜率 S_W(t)：对窗口 [t-W+1, t]（t >= W，全程不含 09:25 集合竞价）的 {(k, D_W(k))} 做 OLS 回归（百分点/分钟）
+ * - 滚动区间增量倍数 M_W(t) 与边际量比偏离 D_W(t) = (M_W(t) - 1) * 100%
+ * - 边际量比趋势斜率 S_W(t)：对窗口 [t-W+1, t]（t >= W，全程不含 09:25 集合竞价）的 {(k, D_W(k))} 做 OLS 回归
  */
 
 export type VolumeState = 'EXPANDING' | 'FLAT' | 'SHRINKING' | 'UNAVAILABLE';
@@ -21,6 +21,27 @@ export interface MinuteTurnoverPoint {
   readonly cumTurnover: number;
 }
 
+/** 单个历史完整交易日输入（用于构建多日分时占比模板） */
+export interface HistoricalDaySeries {
+  readonly bars: readonly MinuteTurnoverPoint[];
+  readonly auctionTurnover?: number | null;
+}
+
+/** 多日平均分时成交占比模板（消除单日开盘异常对全天预测的扰动） */
+export interface IntradayPredictionProfile {
+  /** 实际参与平均的历史完整交易日数 */
+  readonly sampleDays: number;
+  /** 样本日全天成交额均值（元） */
+  readonly avgFullDayTurnover: number;
+  /** 样本日 09:25 竞价占全天比例均值（无竞价样本时为 null） */
+  readonly avgAuctionShare: number | null;
+  /** 每分钟（0..239）平均累计占比 w(k) ∈ (0, 1]，单调非降且 w(239)=1 */
+  readonly minuteShares: ReadonlyMap<number, number>;
+}
+
+/** 全天预测剩余时段贝叶斯收缩默认先验强度 λ（等效 ~12% 全天成交量） */
+export const DEFAULT_PREDICTION_PRIOR_STRENGTH = 0.12;
+
 export interface EnergyEngineConfig {
   /** 放量阈值（百分比数值，默认 5 即 +5%） */
   readonly expandThresholdPct: number;
@@ -28,12 +49,15 @@ export interface EnergyEngineConfig {
   readonly shrinkThresholdPct: number;
   /** 滚动斜率与区间增量倍数窗口长度 W（分钟，默认 5，可选 3/5/10） */
   readonly slopeWindow: number;
+  /** 全天预测贝叶斯收缩先验强度 λ（默认 0.12；传 0 可退化为无收缩直接外推） */
+  readonly predictionPriorStrength?: number;
 }
 
 export const DEFAULT_ENERGY_CONFIG: EnergyEngineConfig = {
   expandThresholdPct: 5,
   shrinkThresholdPct: -5,
   slopeWindow: 5,
+  predictionPriorStrength: DEFAULT_PREDICTION_PRIOR_STRENGTH,
 };
 
 export interface EnergyEvaluationInput {
@@ -47,10 +71,12 @@ export interface EnergyEvaluationInput {
   readonly currentTodayCumTurnover?: number | null;
   /** 当前分钟已过秒数 s ∈ [0, 60]；默认 60 表示该分钟已闭合 */
   readonly elapsedSeconds?: number;
-  /** 上一交易日全天总成交额（元）；缺失或 <= 0 时不输出全天预测 */
+  /** 上一交易日全天总成交额（元）；在无多日预测模板时用作单日回退基线 */
   readonly prevFullDayTurnover?: number | null;
   /** 昨日 09:25 开盘集合竞价成交额（元），仅用于 t=0 未闭合分钟插值基准（不进入斜率窗口） */
   readonly prevAuctionTurnover?: number | null;
+  /** 多日平均分时成交占比模板（可选；缺失时自动回退至昨日单日占比 + 贝叶斯收缩） */
+  readonly predictionProfile?: IntradayPredictionProfile | null;
   /** 阈值与窗口配置（可选，缺省使用默认参数） */
   readonly config?: Partial<EnergyEngineConfig>;
 }
@@ -66,7 +92,7 @@ export interface EnergyMetrics {
   readonly cumRatio: number | null;
   /** 同比变化率百分比 R(t) * 100（如 +12），无法计算时为 null */
   readonly cumRatioPct: number | null;
-  /** 全天预测成交额 Â_full(t)（元），无法计算或无昨日全天额时为 null */
+  /** 全天预测成交额 Â_full(t)（元），采用多日分时占比 + 剩余时段贝叶斯收缩 */
   readonly predictedFullDayTurnover: number | null;
   readonly volumeState: VolumeState;
   /** 边际量比趋势斜率 S_W(t)（百分点/分钟），对最近 W 个连续时刻的 D_W(k) 做 OLS 回归 */
@@ -96,6 +122,151 @@ function toTurnoverMap(series: readonly MinuteTurnoverPoint[]): Map<number, numb
     }
   }
   return map;
+}
+
+/**
+ * 从最近 N 个历史完整交易日构建多日平均分时成交占比模板。
+ * - 仅采用包含收盘末根（minuteIndex === 239）且全天成交额 > 0 的有效历史日
+ * - 无有效历史日时返回 null（调用方自动回退昨日单日基线）
+ */
+export function buildPredictionProfile(
+  days: readonly HistoricalDaySeries[]
+): IntradayPredictionProfile | null {
+  const validDays: Array<{
+    map: Map<number, number>;
+    fullDayTurnover: number;
+    auctionShare: number | null;
+  }> = [];
+
+  for (const day of days) {
+    const map = toTurnoverMap(day.bars);
+    const fullDayTurnover = map.get(239);
+    if (fullDayTurnover === undefined || fullDayTurnover <= 0) {
+      continue;
+    }
+    const auctionShare =
+      isValidNumber(day.auctionTurnover) && day.auctionTurnover >= 0
+        ? Math.min(1, day.auctionTurnover / fullDayTurnover)
+        : null;
+    validDays.push({ map, fullDayTurnover, auctionShare });
+  }
+
+  if (validDays.length === 0) {
+    return null;
+  }
+
+  const avgFullDayTurnover =
+    validDays.reduce((sum, d) => sum + d.fullDayTurnover, 0) / validDays.length;
+
+  const auctionShares = validDays
+    .map((d) => d.auctionShare)
+    .filter((s): s is number => s !== null);
+  const avgAuctionShare =
+    auctionShares.length > 0
+      ? auctionShares.reduce((sum, s) => sum + s, 0) / auctionShares.length
+      : null;
+
+  const minuteShares = new Map<number, number>();
+  let runningMaxShare = avgAuctionShare ?? 0;
+
+  for (let m = 0; m <= 239; m++) {
+    let sumShare = 0;
+    let count = 0;
+    for (const d of validDays) {
+      const val = d.map.get(m);
+      if (val !== undefined) {
+        sumShare += Math.max(0, Math.min(1, val / d.fullDayTurnover));
+        count += 1;
+      }
+    }
+    if (count > 0) {
+      const avg = m === 239 ? 1 : Math.max(runningMaxShare, Math.min(1, sumShare / count));
+      runningMaxShare = avg;
+      minuteShares.set(m, avg);
+    }
+  }
+
+  return {
+    sampleDays: validDays.length,
+    avgFullDayTurnover,
+    avgAuctionShare,
+    minuteShares,
+  };
+}
+
+/** 对齐多日预测模板在时刻 t（已过 s 秒）的累计成交占比 w(t) */
+function alignProfileShare(
+  profile: IntradayPredictionProfile,
+  minuteIndex: number,
+  elapsedSeconds: number
+): number | null {
+  if (!isValidNumber(elapsedSeconds)) return null;
+  const shareAtT = profile.minuteShares.get(minuteIndex);
+  if (shareAtT === undefined || shareAtT <= 0) return null;
+
+  const clampedSeconds = Math.max(0, Math.min(60, elapsedSeconds));
+  if (clampedSeconds >= 60) {
+    return shareAtT;
+  }
+
+  let baseShare: number;
+  if (minuteIndex === 0) {
+    if (profile.avgAuctionShare === null) return null;
+    baseShare = profile.avgAuctionShare;
+  } else {
+    const prevShare = profile.minuteShares.get(minuteIndex - 1);
+    if (prevShare === undefined) return null;
+    baseShare = prevShare;
+  }
+
+  const delta = Math.max(0, shareAtT - baseShare);
+  const aligned = baseShare + (clampedSeconds / 60) * delta;
+  return aligned > 0 ? Math.min(1, aligned) : null;
+}
+
+/**
+ * 贝叶斯收缩全天预测公式：
+ * - 已成交部分直接保留 A_today(t)
+ * - 剩余部分按置信权重 α(t) = w(t) / (w(t) + λ) 在实时倍率 r(t) 与稳态基线 1.0 之间平滑收缩
+ * - w(t) = 1（收盘）时严格等于 A_today(t)；r(t) = 1（平量）时严格等于基线全天额
+ */
+export function computeBayesianFullDayPrediction(params: {
+  todayCumTurnover: number;
+  baselineFullDayTurnover: number;
+  alignedShare: number;
+  priorStrength?: number;
+}): number | null {
+  const { todayCumTurnover, baselineFullDayTurnover, alignedShare } = params;
+  const lambda =
+    isValidNumber(params.priorStrength) && params.priorStrength >= 0
+      ? params.priorStrength
+      : DEFAULT_PREDICTION_PRIOR_STRENGTH;
+
+  if (
+    !isValidNumber(todayCumTurnover) ||
+    todayCumTurnover < 0 ||
+    !isValidNumber(baselineFullDayTurnover) ||
+    baselineFullDayTurnover <= 0 ||
+    !isValidNumber(alignedShare) ||
+    alignedShare <= 0
+  ) {
+    return null;
+  }
+
+  const w = Math.min(1, alignedShare);
+  if (w >= 1) {
+    return todayCumTurnover;
+  }
+
+  const expectedSoFar = baselineFullDayTurnover * w;
+  if (expectedSoFar <= 0) return null;
+
+  const observedRatio = todayCumTurnover / expectedSoFar;
+  const alpha = w + lambda > 0 ? w / (w + lambda) : 1;
+  const effectiveRemainingRatio = alpha * observedRatio + (1 - alpha);
+  const remainingBase = baselineFullDayTurnover * (1 - w);
+
+  return todayCumTurnover + Math.max(0, effectiveRemainingRatio) * remainingBase;
 }
 
 /**
@@ -216,6 +387,8 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
     expandThresholdPct: input.config?.expandThresholdPct ?? DEFAULT_ENERGY_CONFIG.expandThresholdPct,
     shrinkThresholdPct: input.config?.shrinkThresholdPct ?? DEFAULT_ENERGY_CONFIG.shrinkThresholdPct,
     slopeWindow: input.config?.slopeWindow ?? DEFAULT_ENERGY_CONFIG.slopeWindow,
+    predictionPriorStrength:
+      input.config?.predictionPriorStrength ?? DEFAULT_PREDICTION_PRIOR_STRENGTH,
   };
 
   const t = input.minuteIndex;
@@ -254,9 +427,33 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
     } else {
       volumeState = 'FLAT';
     }
+  }
 
-    if (isValidNumber(input.prevFullDayTurnover) && input.prevFullDayTurnover > 0) {
-      predictedFullDayTurnover = input.prevFullDayTurnover * (todayAtT / prevAlignedAtT);
+  // 全天预测成交额：优先采用多日分时占比模板 + 剩余时段贝叶斯收缩；无模板时回退至昨日单日占比 + 贝叶斯收缩
+  if (todayAtT !== null && hasValidElapsed) {
+    if (input.predictionProfile && input.predictionProfile.sampleDays > 0) {
+      const profileShare = alignProfileShare(input.predictionProfile, t, elapsedSeconds);
+      if (profileShare !== null) {
+        predictedFullDayTurnover = computeBayesianFullDayPrediction({
+          todayCumTurnover: todayAtT,
+          baselineFullDayTurnover: input.predictionProfile.avgFullDayTurnover,
+          alignedShare: profileShare,
+          priorStrength: cfg.predictionPriorStrength,
+        });
+      }
+    } else if (
+      prevAlignedAtT !== null &&
+      prevAlignedAtT > 0 &&
+      isValidNumber(input.prevFullDayTurnover) &&
+      input.prevFullDayTurnover > 0
+    ) {
+      const singleDayShare = Math.min(1, prevAlignedAtT / input.prevFullDayTurnover);
+      predictedFullDayTurnover = computeBayesianFullDayPrediction({
+        todayCumTurnover: todayAtT,
+        baselineFullDayTurnover: input.prevFullDayTurnover,
+        alignedShare: singleDayShare,
+        priorStrength: cfg.predictionPriorStrength,
+      });
     }
   }
 
@@ -294,7 +491,6 @@ export function evaluateEnergy(input: EnergyEvaluationInput): EnergyMetrics {
   }
 
   // 指标 B：边际量比趋势斜率 S_W(t) — 对最近 W 个连续时刻 [t - W + 1, t] 的 D_W(k) 做 OLS 线性回归
-  // 要求 t >= W（使窗口起点 t - W + 1 >= 1，全程剔除 09:25 竞价污染，且早盘尾盘量纲完全一致）
   let slope: number | null = null;
   if (Number.isInteger(W) && W >= 2 && t >= W) {
     const windowPoints: Array<[number, number]> = [];
@@ -345,6 +541,7 @@ export function evaluateEnergySeries(params: {
   readonly prevSeries: readonly MinuteTurnoverPoint[];
   readonly prevFullDayTurnover?: number | null;
   readonly prevAuctionTurnover?: number | null;
+  readonly predictionProfile?: IntradayPredictionProfile | null;
   readonly config?: Partial<EnergyEngineConfig>;
 }): EnergyMetrics[] {
   const sortedIndices = [...new Set(params.todaySeries.map((p) => p.minuteIndex))]
@@ -359,6 +556,7 @@ export function evaluateEnergySeries(params: {
       elapsedSeconds: 60,
       prevFullDayTurnover: params.prevFullDayTurnover,
       prevAuctionTurnover: params.prevAuctionTurnover,
+      predictionProfile: params.predictionProfile,
       config: params.config,
     })
   );

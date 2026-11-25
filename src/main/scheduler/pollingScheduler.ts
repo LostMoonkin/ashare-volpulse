@@ -15,6 +15,7 @@ import {
   timestampToMinuteIndex,
   type AlertRuleConfig,
   type EnergyEngineConfig,
+  type IntradayPredictionProfile,
   type MarketPhase,
   type SymbolAlertOverride,
   type SymbolMinuteBar,
@@ -59,6 +60,10 @@ import {
   type SleepLike,
 } from '../providers';
 import type { AppDatabase } from '../storage/database';
+import {
+  loadMarketTotalPredictionProfile,
+  loadSymbolPredictionProfile,
+} from '../storage/predictionProfileLoader';
 import type { SecretStore } from '../storage/secretStore';
 
 const TOTAL_DAY_BARS = 240;
@@ -334,6 +339,7 @@ export class PollingScheduler {
   private readonly prevAuctions = new Map<string, { openPrice: number; auctionTurnover: number }>();
   private readonly pendingBars = new Map<string, PendingMinuteBar>();
   private readonly loadedFromDbSymbols = new Set<string>();
+  private readonly predictionProfiles = new Map<string, IntradayPredictionProfile | null>();
   private readonly lastBackfillAttemptAt = new Map<string, number>();
   private readonly intradaySourceBySymbol = new Map<string, ProviderId>();
   private readonly cybRealignedGroups = new Set<string>();
@@ -620,6 +626,7 @@ export class PollingScheduler {
     this.prevAuctions.clear();
     this.pendingBars.clear();
     this.loadedFromDbSymbols.clear();
+    this.predictionProfiles.clear();
     this.lastBackfillAttemptAt.clear();
     this.intradaySourceBySymbol.clear();
     this.latestSnapshots.clear();
@@ -1008,6 +1015,34 @@ export class PollingScheduler {
     }
 
     this.loadedFromDbSymbols.add(symbol);
+    this.predictionProfiles.set(
+      symbol,
+      loadSymbolPredictionProfile(this.db, symbol, this.displayTradeDate)
+    );
+    if ((MARKET_TOTAL_COMPONENTS as readonly string[]).includes(symbol)) {
+      const [shSym, szSym] = MARKET_TOTAL_COMPONENTS;
+      if (this.loadedFromDbSymbols.has(shSym) && this.loadedFromDbSymbols.has(szSym)) {
+        this.predictionProfiles.set(
+          MARKET_TOTAL_SYMBOL,
+          loadMarketTotalPredictionProfile(this.db, this.displayTradeDate)
+        );
+      } else {
+        this.predictionProfiles.delete(MARKET_TOTAL_SYMBOL);
+      }
+    }
+  }
+
+  private getPredictionProfile(symbol: string): IntradayPredictionProfile | null {
+    if (this.stopped || !this.displayTradeDate) return null;
+    if (this.predictionProfiles.has(symbol)) {
+      return this.predictionProfiles.get(symbol) ?? null;
+    }
+    const profile =
+      symbol === MARKET_TOTAL_SYMBOL
+        ? loadMarketTotalPredictionProfile(this.db, this.displayTradeDate)
+        : loadSymbolPredictionProfile(this.db, symbol, this.displayTradeDate);
+    this.predictionProfiles.set(symbol, profile);
+    return profile;
   }
 
   private needsBackfill(symbol: string, nowMs: number, phase: MarketPhase): boolean {
@@ -1726,6 +1761,7 @@ export class PollingScheduler {
             elapsedSeconds: evalElapsedSec,
             prevFullDayTurnover,
             prevAuctionTurnover: prevAggAuction.auctionTurnover,
+            predictionProfile: this.getPredictionProfile(MARKET_TOTAL_SYMBOL),
             config: {
               ...this.energyConfig,
               slopeWindow: alertCfg.slopeWindow,
@@ -1865,6 +1901,7 @@ export class PollingScheduler {
             elapsedSeconds: evalElapsedSec,
             prevFullDayTurnover,
             prevAuctionTurnover: prevAuction,
+            predictionProfile: this.getPredictionProfile(symbol),
             config: {
               ...this.energyConfig,
               slopeWindow: alertCfg.slopeWindow,

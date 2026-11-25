@@ -248,6 +248,16 @@ export class AppDatabase {
     return rows.map((r) => r.trade_date);
   }
 
+  /** 查询早于指定交易日的最近 limit 个已录制交易日（降序，用于多日分时预测模板） */
+  getRecentRecordedBarDatesBefore(beforeDate: string, limit = 10): string[] {
+    const rows = this.db
+      .prepare(
+        'SELECT DISTINCT trade_date FROM intraday_bars WHERE trade_date < ? ORDER BY trade_date DESC LIMIT ?'
+      )
+      .all(beforeDate, limit) as Array<{ trade_date: string }>;
+    return rows.map((r) => r.trade_date);
+  }
+
   /** 查询指定交易日在本地已录制分钟线中的所有标的 */
   getRecordedSymbolsForDate(tradeDate: string): string[] {
     const rows = this.db

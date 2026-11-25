@@ -54,8 +54,12 @@
    - **同比差额**：$\Delta A(t) = A_{\text{today}}(t) - A_{\text{prev}}(t)$
    - **同比变化率（量比偏离）**：
      $$R(t) = \frac{A_{\text{today}}(t) - A_{\text{prev}}(t)}{A_{\text{prev}}(t)} \quad (A_{\text{prev}}(t) > 0)$$
-   - **全天预测成交额**（仅大盘及具备昨日全天成交额 $A_{\text{prev,full}}$ 的标的）：
-     $$\hat{A}_{\text{full}}(t) = A_{\text{prev,full}} \times \frac{A_{\text{today}}(t)}{A_{\text{prev}}(t)}$$
+   - **全天预测成交额**（仅大盘及具备历史全天成交额基线的标的，采用**多日分时占比模板 + 剩余时段贝叶斯收缩**，消除开盘前几分钟单日基线噪声导致的剧烈偏低/偏高）：
+     - 优先取本地 SQLite 最近最多 `10` 个历史完整交易日（不足时自动退回已有天数 / 昨日）计算每分钟平均累计占比 $\bar{w}(t) \in (0, 1]$（未闭合分钟按已过秒数线性插值）及样本日全天成交额均值 $\bar{A}_{\text{full}}$；
+     - 计算当前实时倍率 $r(t) = \frac{A_{\text{today}}(t)}{\bar{A}_{\text{full}} \cdot \bar{w}(t)}$ 与基于已成交占比的贝叶斯置信权重 $\alpha(t) = \frac{\bar{w}(t)}{\bar{w}(t) + \lambda}$（默认先验强度 $\lambda = 0.12$）；
+     - 拆分已成交与剩余时段预测：
+       $$\hat{A}_{\text{full}}(t) = A_{\text{today}}(t) + \Bigl(\alpha(t) \cdot r(t) + \bigl(1 - \alpha(t)\bigr)\Bigr) \cdot \bar{A}_{\text{full}} \cdot \bigl(1 - \bar{w}(t)\bigr)$$
+       保证平量无偏、开盘稳健防腰斩、收盘 $\bar{w}(239)=1$ 时严格等于真实收盘成交额。
    - **放/缩量状态判定**（阈值可配置，默认 `±5%`）：
      - $R(t) \ge +5\%$：`放量`
      - $R(t) \le -5\%$：`缩量`

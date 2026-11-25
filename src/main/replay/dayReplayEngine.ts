@@ -38,6 +38,11 @@ import type {
   WatchlistItemRow,
 } from '../../shared/types';
 import type { AppDatabase } from '../storage/database';
+import {
+  loadMarketTotalPredictionProfile,
+  loadSymbolPredictionProfile,
+} from '../storage/predictionProfileLoader';
+import type { IntradayPredictionProfile } from '../../core';
 
 const TOTAL_MINUTE_BARS = 240;
 const TOTAL_REPLAY_STEPS = 241; // 0 = 09:25 集合竞价，1..240 = minuteIndex 0..239
@@ -180,6 +185,7 @@ export class DayReplayEngine {
   private readonly prevBarsBySymbol = new Map<string, IntradayBarRow[]>();
   private readonly todayAuctionBySymbol = new Map<string, { openPrice: number; auctionTurnover: number }>();
   private readonly prevAuctionBySymbol = new Map<string, { openPrice: number; auctionTurnover: number }>();
+  private readonly predictionProfiles = new Map<string, IntradayPredictionProfile | null>();
 
   private currentStepIndex = -1;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -276,7 +282,14 @@ export class DayReplayEngine {
       } else {
         this.prevBarsBySymbol.set(sym, []);
       }
+
+      this.predictionProfiles.set(sym, loadSymbolPredictionProfile(this.db, sym, this.tradeDate));
     }
+
+    this.predictionProfiles.set(
+      MARKET_TOTAL_SYMBOL,
+      loadMarketTotalPredictionProfile(this.db, this.tradeDate)
+    );
   }
 
   /** 启动加速定时回放（驱动渲染进程从 09:25 推进至 15:00） */
@@ -664,6 +677,7 @@ export class DayReplayEngine {
           elapsedSeconds: 60,
           prevFullDayTurnover,
           prevAuctionTurnover: prevAggAuc.auctionTurnover,
+          predictionProfile: this.predictionProfiles.get(MARKET_TOTAL_SYMBOL) ?? null,
           config: {
             ...this.energyConfig,
             slopeWindow: alertCfg.slopeWindow,
@@ -806,6 +820,7 @@ export class DayReplayEngine {
           elapsedSeconds: 60,
           prevFullDayTurnover,
           prevAuctionTurnover: prevAuc,
+          predictionProfile: this.predictionProfiles.get(symbol) ?? null,
           config: {
             ...this.energyConfig,
             slopeWindow: alertCfg.slopeWindow,
