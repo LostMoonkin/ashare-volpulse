@@ -259,7 +259,7 @@ describe('TrayManager', () => {
       onQuit: vi.fn(),
     };
 
-    const trayMgr = new TrayManager(actions);
+    const trayMgr = new TrayManager(actions, 'win32');
     trayMgr.init(makeShellState({ isDev: true }), makeDashboardState({ volumeState: 'EXPANDING' }));
 
     const trayInstance = mockTrayInstances[mockTrayInstances.length - 1];
