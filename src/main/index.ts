@@ -139,6 +139,7 @@ function applyAutoLaunchSetting(enabled: boolean): boolean {
 
 function applyMonitorConfigToScheduler(config: MonitorConfig): void {
   if (replayEngine) {
+    replayEngine.updateEnabledOptionalIndices(config.enabledOptionalIndices);
     replayEngine.updateEnergyConfig({
       expandThresholdPct: config.expandThresholdPct,
       shrinkThresholdPct: config.shrinkThresholdPct,
@@ -156,6 +157,7 @@ function applyMonitorConfigToScheduler(config: MonitorConfig): void {
     });
   }
   if (!scheduler) return;
+  scheduler.updateEnabledOptionalIndices(config.enabledOptionalIndices);
   scheduler.updatePollingInterval(config.pollingIntervalSec);
   scheduler.updateEnergyConfig({
     expandThresholdPct: config.expandThresholdPct,
@@ -471,6 +473,26 @@ function registerIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(IPC_CHANNELS.ALERT_MARK_READ, (_event, id: number): boolean => {
+    if (typeof id !== 'number' || !Number.isInteger(id)) {
+      return false;
+    }
+    if (replayEngine) {
+      return replayEngine.markReplayAlertRead(id);
+    }
+    if (!database) return false;
+    return database.markAlertEventRead(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ALERT_MARK_ALL_READ, (_event, tradeDate?: string): number => {
+    const normalizedDate = typeof tradeDate === 'string' && tradeDate.trim() ? tradeDate.trim() : undefined;
+    if (replayEngine) {
+      return replayEngine.markAllReplayAlertsRead(normalizedDate);
+    }
+    if (!database) return 0;
+    return database.markAllAlertEventsRead(normalizedDate);
+  });
+
   ipcMain.handle(
     IPC_CHANNELS.ALERT_SIMULATE,
     (_event, direction: AlertDirection, symbol?: string) => {
@@ -607,6 +629,7 @@ function initServices(): void {
       database,
       tradeDate: replayCliOptions.tradeDate,
       stepIntervalMs: replayCliOptions.stepIntervalMs,
+      enabledOptionalIndices: initialMonitorConfig.enabledOptionalIndices,
       energyConfig: {
         expandThresholdPct: initialMonitorConfig.expandThresholdPct,
         shrinkThresholdPct: initialMonitorConfig.shrinkThresholdPct,
@@ -642,6 +665,7 @@ function initServices(): void {
       primaryIntradayProvider: tencentProvider,
       secondaryIntradayProvider: eastmoneyProvider,
       configuredIntervalSec: initialMonitorConfig.pollingIntervalSec,
+      enabledOptionalIndices: initialMonitorConfig.enabledOptionalIndices,
       energyConfig: {
         expandThresholdPct: initialMonitorConfig.expandThresholdPct,
         shrinkThresholdPct: initialMonitorConfig.shrinkThresholdPct,

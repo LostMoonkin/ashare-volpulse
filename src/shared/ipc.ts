@@ -31,6 +31,8 @@ export const IPC_CHANNELS = {
   MARKET_STATE_UPDATED: 'market:state-updated',
   ALERT_TRIGGERED: 'alert:triggered',
   ALERT_GET_RECENT: 'alert:get-recent',
+  ALERT_MARK_READ: 'alert:mark-read',
+  ALERT_MARK_ALL_READ: 'alert:mark-all-read',
   ALERT_SIMULATE: 'alert:simulate',
   TICKER_SEARCH: 'ticker:search',
   MONITOR_GET_CONFIG: 'monitor:get-config',
@@ -85,6 +87,8 @@ export interface PreloadApi {
   setHudMode(mode: HudMode): Promise<DesktopShellState>;
   setDetailModalOpen(open: boolean): Promise<void>;
   getRecentAlerts(tradeDate?: string, limit?: number): Promise<AlertEventRow[]>;
+  markAlertRead(id: number): Promise<boolean>;
+  markAllAlertsRead(tradeDate?: string): Promise<number>;
   simulateAlert(direction: AlertDirection, symbol?: string): Promise<AlertDispatchPayload>;
   onMarketStateUpdated(listener: (state: MarketDashboardState) => void): () => void;
   onAlertTriggered(listener: (event: AlertDispatchPayload) => void): () => void;

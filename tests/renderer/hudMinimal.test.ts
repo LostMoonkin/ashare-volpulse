@@ -94,6 +94,7 @@ function makeShellState(hudMode: HudMode): DesktopShellState {
 }
 
 function makeMarketState(options?: {
+  indices?: SymbolEnergySnapshot[];
   watchlist?: SymbolEnergySnapshot[];
   cumTurnover?: number | null;
   degraded?: boolean;
@@ -154,11 +155,11 @@ function makeMarketState(options?: {
       degraded: options?.degraded ?? false,
       degradedReason: options?.degraded ? '数据源异常' : null,
     },
-    indices: [
+    indices: options?.indices ?? [
       makeIndex('000001.SH', '上证指数'),
       makeIndex('399001.SZ', '深证成指'),
       makeIndex('399006.SZ', '创业板指'),
-      makeIndex('000688.SH', '科创50'),
+      makeIndex('000680.SH', '科创综指'),
     ],
     watchlist: options?.watchlist ?? [
       makeStock('600519.SH', '贵州茅台', 1580, 1.25),
@@ -231,7 +232,7 @@ describe('HUD minimal mode', () => {
     expect(html).not.toContain('上证指数');
     expect(html).not.toContain('深证成指');
     expect(html).not.toContain('创业板指');
-    expect(html).not.toContain('科创50');
+    expect(html).not.toContain('科创综指');
     expect(html).not.toContain('hud-footer');
     expect(html).not.toContain('+ 管理');
     expect(html).not.toContain('老板键');
@@ -277,6 +278,7 @@ describe('HUD minimal mode', () => {
       cumRatio: 0.12,
       message: '快速放量',
       createdAt: Date.now(),
+      isRead: false,
       isSimulated: false,
       muted: false,
     };
@@ -296,9 +298,32 @@ describe('HUD minimal mode', () => {
       market: makeMarketState(),
     });
     expect(standardHtml).toContain('上证指数');
+    expect(standardHtml).toContain('深证成指');
+    expect(standardHtml).toContain('创业板指');
+    expect(standardHtml).toContain('科创综指');
     expect(standardHtml).toContain('中国平安');
     expect(standardHtml).toContain('东方财富');
     expect(standardHtml).toContain('>简</button>');
     expect(standardHtml).toContain('hud-footer');
+
+    // 当用户在设置中开启可选扩展指数时，标准模式 HUD 应完整展示全部已开启指数（不被截断为 4 条）
+    const expandedStandardHtml = renderHud({
+      shell: makeShellState('standard'),
+      market: makeMarketState({
+        indices: [
+          makeIndex('000001.SH', '上证指数'),
+          makeIndex('399001.SZ', '深证成指'),
+          makeIndex('399006.SZ', '创业板指'),
+          makeIndex('000680.SH', '科创综指'),
+          makeIndex('000016.SH', '上证50'),
+          makeIndex('000300.SH', '沪深300'),
+          makeIndex('000852.SH', '中证1000'),
+          makeIndex('000688.SH', '科创50'),
+        ],
+      }),
+    });
+    for (const label of ['上证指数', '深证成指', '创业板指', '科创综指', '上证50', '沪深300', '中证1000', '科创50']) {
+      expect(expandedStandardHtml).toContain(label);
+    }
   });
 });

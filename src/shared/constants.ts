@@ -16,7 +16,7 @@ export interface CoreIndexMeta {
   readonly scopeDetail: string;
 }
 
-/** 四大核心展示指数元数据（口径依据 Phase 0 实测结论） */
+/** 默认展示的四大核心板块指数元数据（上、深、双创全市场口径，依据实测结论） */
 export const CORE_INDICES: readonly CoreIndexMeta[] = [
   {
     symbol: '000001.SH',
@@ -37,6 +37,34 @@ export const CORE_INDICES: readonly CoreIndexMeta[] = [
     scopeDetail: '创业板全市场（腾讯/新浪口径与 399102.SZ 一致）',
   },
   {
+    symbol: '000680.SH',
+    name: '科创综指',
+    scope: '全市场',
+    scopeDetail: '科创板全市场（四源实测一致）',
+  },
+] as const;
+
+/** 可选扩展展示指数元数据（默认关闭，可在设置中按需开启） */
+export const OPTIONAL_INDICES: readonly CoreIndexMeta[] = [
+  {
+    symbol: '000016.SH',
+    name: '上证50',
+    scope: '成分股',
+    scopeDetail: '上证50成分股（50只）',
+  },
+  {
+    symbol: '000300.SH',
+    name: '沪深300',
+    scope: '成分股',
+    scopeDetail: '沪深300成分股（300只）',
+  },
+  {
+    symbol: '000852.SH',
+    name: '中证1000',
+    scope: '成分股',
+    scopeDetail: '中证1000成分股（1000只）',
+  },
+  {
     symbol: '000688.SH',
     name: '科创50',
     scope: '成分股',
@@ -44,23 +72,79 @@ export const CORE_INDICES: readonly CoreIndexMeta[] = [
   },
 ] as const;
 
-/** 盘中行情采集需要拉取的 5 只指数（含深证综指用于两市总成交额聚合） */
+export const OPTIONAL_INDEX_SYMBOLS = [
+  '000016.SH',
+  '000300.SH',
+  '000852.SH',
+  '000688.SH',
+] as const;
+
+export type OptionalIndexSymbol = (typeof OPTIONAL_INDEX_SYMBOLS)[number];
+
+/** 盘中行情采集默认必拉取的 5 只基础指数（含深证综指用于两市总成交额聚合） */
 export const MONITORED_INDEX_SYMBOLS = [
   '000001.SH',
   '399106.SZ',
   '399001.SZ',
   '399006.SZ',
-  '000688.SH',
+  '000680.SH',
 ] as const;
 
-/** 5 只监控指数标准名称映射（用于同花顺等不返回 name 的快照源补全） */
+/** 全部受管大盘/宽基指数代码（基础必采 5 只 + 可选扩展 4 只） */
+export const ALL_INDEX_SYMBOLS = [
+  ...MONITORED_INDEX_SYMBOLS,
+  ...OPTIONAL_INDEX_SYMBOLS,
+] as const;
+
+/** 全部受管指数标准名称映射（用于同花顺等不返回 name 的快照源补全与告警展示） */
 export const MONITORED_INDEX_NAMES: Readonly<Record<string, string>> = {
   '000001.SH': '上证指数',
   '399106.SZ': '深证综指',
   '399001.SZ': '深证成指',
   '399006.SZ': '创业板指',
+  '000680.SH': '科创综指',
+  '000016.SH': '上证50',
+  '000300.SH': '沪深300',
+  '000852.SH': '中证1000',
   '000688.SH': '科创50',
 };
+
+const OPTIONAL_INDEX_SYMBOL_SET = new Set<string>(OPTIONAL_INDEX_SYMBOLS);
+
+/** 规范化已启用的可选指数列表（过滤非法值、去重并保持固定展示顺序） */
+export function normalizeEnabledOptionalIndices(
+  raw: readonly unknown[] | null | undefined
+): OptionalIndexSymbol[] {
+  if (!Array.isArray(raw)) return [];
+  const enabled = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const upper = item.trim().toUpperCase();
+    if (OPTIONAL_INDEX_SYMBOL_SET.has(upper)) {
+      enabled.add(upper);
+    }
+  }
+  return OPTIONAL_INDEX_SYMBOLS.filter((sym) => enabled.has(sym));
+}
+
+/** 按配置解析当前面板应展示的指数列表（固定核心 4 指数 + 已开启的可选指数） */
+export function resolveDisplayedIndices(
+  enabledOptionalIndices?: readonly string[]
+): CoreIndexMeta[] {
+  const enabledSet = new Set<string>(normalizeEnabledOptionalIndices(enabledOptionalIndices));
+  return [
+    ...CORE_INDICES,
+    ...OPTIONAL_INDICES.filter((meta) => enabledSet.has(meta.symbol)),
+  ];
+}
+
+/** 按配置解析当前调度器应采集的指数代码集合（必采 5 指数 + 已开启的可选指数） */
+export function resolveMonitoredIndexSymbols(
+  enabledOptionalIndices?: readonly string[]
+): string[] {
+  const optional = normalizeEnabledOptionalIndices(enabledOptionalIndices);
+  return [...MONITORED_INDEX_SYMBOLS, ...optional];
+}
 
 /** 盘中轮询频率与退避预算（依据 Phase 0 压测结论） */
 export const DEFAULT_POLLING_INTERVAL_SEC = 3;

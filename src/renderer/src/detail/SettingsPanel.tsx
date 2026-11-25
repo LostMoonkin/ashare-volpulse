@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { ALLOWED_SLOPE_WINDOWS } from '../../../shared/constants';
+import {
+  ALLOWED_SLOPE_WINDOWS,
+  CORE_INDICES,
+  OPTIONAL_INDICES,
+  normalizeEnabledOptionalIndices,
+  type OptionalIndexSymbol,
+} from '../../../shared/constants';
 import type {
   AlertMatchModeType,
   BossKeyStatus,
@@ -142,8 +148,11 @@ export function SettingsPanel({
 
   const handleSaveMonitorDraft = () => {
     if (!draft || !numDraft) return;
-    const payload: MonitorConfig = {
-      ...draft,
+    const payload: Partial<MonitorConfig> = {
+      pollingIntervalSec: draft.pollingIntervalSec,
+      slopeWindow: draft.slopeWindow,
+      alertsEnabled: draft.alertsEnabled,
+      matchMode: draft.matchMode,
       expandThresholdPct: parseFiniteOrFallback(
         numDraft.expandThresholdPct,
         draft.expandThresholdPct
@@ -171,6 +180,21 @@ export function SettingsPanel({
       cooldownMinutes: parseFiniteOrFallback(numDraft.cooldownMinutes, draft.cooldownMinutes),
     };
     void applyMonitorPatch(payload);
+  };
+
+  const enabledOptionalSet = new Set<string>(
+    monitorConfig?.enabledOptionalIndices ?? draft?.enabledOptionalIndices ?? []
+  );
+
+  const handleToggleOptionalIndex = (symbol: OptionalIndexSymbol, enabled: boolean) => {
+    const nextSet = new Set(enabledOptionalSet);
+    if (enabled) {
+      nextSet.add(symbol);
+    } else {
+      nextSet.delete(symbol);
+    }
+    const nextList = normalizeEnabledOptionalIndices([...nextSet]);
+    void applyMonitorPatch({ enabledOptionalIndices: nextList });
   };
 
   const handleSaveApiKey = async () => {
@@ -233,6 +257,48 @@ export function SettingsPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      {/* 0. 大盘与可选扩展指数展示配置 */}
+      <section className="panel-card">
+        <h2 className="panel-title">
+          <span>指数展示配置（勾选即刻生效并持久化）</span>
+          <span className="badge badge-muted">
+            已开启 {enabledOptionalSet.size}/{OPTIONAL_INDICES.length} 项扩展指数
+          </span>
+        </h2>
+        <div className="setting-desc" style={{ marginBottom: '10px' }}>
+          面板默认固定展示「上、深、双创」全市场板块指数：
+          {CORE_INDICES.map((idx) => `${idx.name} (${idx.symbol})`).join('、')}
+          。以下宽基成分股指数默认关闭，按需开启后会同步接入实时快照、分时能量图与异动提醒（不参与两市总成交额累加）。
+        </div>
+        <div className="optional-index-grid">
+          {OPTIONAL_INDICES.map((idx) => {
+            const symbol = idx.symbol as OptionalIndexSymbol;
+            const checked = enabledOptionalSet.has(symbol);
+            return (
+              <label
+                key={idx.symbol}
+                className={`optional-index-card ${checked ? 'active' : ''}`}
+              >
+                <div className="optional-index-head">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={savingMonitor}
+                      onChange={(e) => handleToggleOptionalIndex(symbol, e.target.checked)}
+                    />
+                    <strong>{idx.name}</strong>
+                    <span className="scope-tag">{idx.scope}</span>
+                  </div>
+                  <span className="muted-mono">{idx.symbol}</span>
+                </div>
+                <div className="setting-desc">{idx.scopeDetail}</div>
+              </label>
+            );
+          })}
+        </div>
+      </section>
+
       {/* 1. 行情轮询与放缩量/斜率告警参数 */}
       <section className="panel-card">
         <h2 className="panel-title">

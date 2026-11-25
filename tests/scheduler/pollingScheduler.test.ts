@@ -1394,4 +1394,107 @@ describe('PollingScheduler', () => {
     expect(snapCallCount).toBe(2);
     dbQueue.close();
   });
+
+  it('defaults to SH/SZ/CYB/STAR-Composite indices and dynamically enables/disables optional indices', async () => {
+    const db = new AppDatabase(':memory:');
+    try {
+      db.upsertTradingDays([
+        { date: '2026-11-24', isOpen: true },
+        { date: '2026-11-25', isOpen: true },
+      ]);
+      db.setSetting('calendar.lastSyncedDate', '2026-11-25');
+
+      const nowMs = shanghaiToTimestampMs('2026-11-25', 10, 0, 15);
+      const snapshotBatches: string[][] = [];
+      const intradayCalls: string[] = [];
+
+      const primary = createFakeProvider('tencent', {
+        fetchIntradayMinutes: vi.fn(async (symbol: string) => {
+          intradayCalls.push(symbol);
+          return [
+            makeIntradayDay({ symbol, tradeDate: '2026-11-25', barCount: 30, baseTurnoverPerMin: 2e9 }),
+            makeIntradayDay({ symbol, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 1.8e9 }),
+          ];
+        }),
+        fetchBatchSnapshots: vi.fn(async (symbols: readonly string[]) => {
+          snapshotBatches.push([...symbols]);
+          const map = new Map<string, QuoteSnapshot>();
+          for (const s of symbols) {
+            map.set(
+              s,
+              makeSnapshot({
+                symbol: s,
+                tradeDate: '2026-11-25',
+                timestampMs: nowMs,
+                turnover: 65e9,
+              })
+            );
+          }
+          return map;
+        }),
+      });
+
+      const scheduler = new PollingScheduler({
+        database: db,
+        primarySnapshotProvider: primary,
+        secondarySnapshotProvider: createFakeProvider('sina'),
+        hithinkProvider: createFakeHithink({ configured: false }),
+        primaryIntradayProvider: primary,
+        secondaryIntradayProvider: createFakeProvider('eastmoney'),
+        nowFn: () => nowMs,
+        sleepFn: async () => {},
+        backfillDelayMs: 0,
+      });
+
+      // 1. 默认状态仅展示上、深、双创，且不采集未开启的可选扩展指数
+      const sDefault = await scheduler.tickOnce();
+      expect(sDefault.indices.map((i) => i.symbol)).toEqual([
+        '000001.SH',
+        '399001.SZ',
+        '399006.SZ',
+        '000680.SH',
+      ]);
+      expect(snapshotBatches[0]).toEqual([
+        '000001.SH',
+        '399106.SZ',
+        '399001.SZ',
+        '399006.SZ',
+        '000680.SH',
+      ]);
+      expect(intradayCalls).not.toContain('000016.SH');
+      expect(intradayCalls).not.toContain('000688.SH');
+
+      // 2. 开启沪深300与科创50后，自动补齐分时基线、纳入快照批次并按标准顺序展示
+      scheduler.updateEnabledOptionalIndices(['000688.SH', '000300.SH']);
+      const sEnabled = await scheduler.refreshNow();
+      expect(sEnabled.indices.map((i) => i.symbol)).toEqual([
+        '000001.SH',
+        '399001.SZ',
+        '399006.SZ',
+        '000680.SH',
+        '000300.SH',
+        '000688.SH',
+      ]);
+      expect(sEnabled.indices.find((i) => i.symbol === '000300.SH')?.scope).toBe('成分股');
+      expect(sEnabled.indices.find((i) => i.symbol === '000688.SH')?.scope).toBe('成分股');
+      expect(snapshotBatches[1]).toContain('000300.SH');
+      expect(snapshotBatches[1]).toContain('000688.SH');
+      expect(intradayCalls).toContain('000300.SH');
+      expect(intradayCalls).toContain('000688.SH');
+
+      // 3. 关闭全部可选扩展指数后，立即恢复仅展示与采集默认核心指数
+      scheduler.updateEnabledOptionalIndices([]);
+      const sDisabled = await scheduler.refreshNow();
+      expect(sDisabled.indices.map((i) => i.symbol)).toEqual([
+        '000001.SH',
+        '399001.SZ',
+        '399006.SZ',
+        '000680.SH',
+      ]);
+      expect(snapshotBatches[2]).not.toContain('000300.SH');
+      expect(snapshotBatches[2]).not.toContain('000688.SH');
+    } finally {
+      db.close();
+    }
+  });
 });

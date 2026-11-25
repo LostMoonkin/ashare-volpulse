@@ -106,6 +106,7 @@ export class AlertDispatcher {
     const payload: AlertDispatchPayload = {
       ...eventToStore,
       id,
+      isRead: false,
       isSimulated,
       muted,
     };

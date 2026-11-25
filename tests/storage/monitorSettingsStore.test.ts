@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { MonitorConfig } from '../../src/shared/types';
 import { AppDatabase } from '../../src/main/storage/database';
 import {
   DEFAULT_MONITOR_CONFIG,
@@ -57,6 +58,7 @@ describe('MonitorSettingsStore', () => {
       shrinkMultipleThreshold: 0.55,
       matchMode: 'OR',
       cooldownMinutes: 8,
+      enabledOptionalIndices: [],
     });
 
     // 模拟重启重新加载
@@ -66,5 +68,39 @@ describe('MonitorSettingsStore', () => {
     // 非法斜率窗口回退到已有合法值
     const sanitized = sanitizeMonitorConfig({ slopeWindow: 7 as unknown as 5 }, reloaded);
     expect(sanitized.slopeWindow).toBe(10);
+  });
+
+  it('defaults optional indices to disabled and persists sanitized optional index selections', () => {
+    const db = createMemoryDb();
+    const store = new MonitorSettingsStore(db);
+
+    expect(store.load().enabledOptionalIndices).toEqual([]);
+
+    // 乱序 + 重复 + 非法代码均自动清洗并按标准顺序排列
+    const updated = store.update({
+      enabledOptionalIndices: [
+        '000688.SH',
+        '000016.SH',
+        '000688.SH',
+        '932000.CSI',
+        '000680.SH',
+      ] as unknown as MonitorConfig['enabledOptionalIndices'],
+    });
+    expect(updated.enabledOptionalIndices).toEqual(['000016.SH', '000688.SH']);
+
+    // 模拟重启重新加载保持不变
+    expect(new MonitorSettingsStore(db).load().enabledOptionalIndices).toEqual([
+      '000016.SH',
+      '000688.SH',
+    ]);
+
+    // 单独修改其他字段不应误覆盖已开启的可选指数
+    const afterOtherPatch = store.update({ pollingIntervalSec: 5 });
+    expect(afterOtherPatch.enabledOptionalIndices).toEqual(['000016.SH', '000688.SH']);
+
+    // 全部关闭后持久化为空数组
+    const cleared = store.update({ enabledOptionalIndices: [] });
+    expect(cleared.enabledOptionalIndices).toEqual([]);
+    expect(new MonitorSettingsStore(db).load().enabledOptionalIndices).toEqual([]);
   });
 });

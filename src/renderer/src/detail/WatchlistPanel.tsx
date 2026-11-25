@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_ALERT_CONFIG } from '../../../core/alertEngine';
-import { MONITORED_INDEX_SYMBOLS } from '../../../shared/constants';
+import { MONITORED_INDEX_SYMBOLS, OPTIONAL_INDEX_SYMBOLS } from '../../../shared/constants';
 import type {
   AlertMatchModeType,
   MarketDashboardState,
@@ -22,6 +22,7 @@ import {
 } from '../utils/format';
 
 const CORE_INDEX_SYMBOL_SET = new Set<string>(MONITORED_INDEX_SYMBOLS);
+const OPTIONAL_INDEX_SYMBOL_SET = new Set<string>(OPTIONAL_INDEX_SYMBOLS);
 
 export interface WatchlistPanelProps {
   watchlistRows: readonly WatchlistItemRow[];
@@ -330,8 +331,10 @@ export function WatchlistPanel({
         {!searching && results.length > 0 && (
           <div className="search-result-list">
             {results.map((item) => {
+              const upperSym = item.symbol.toUpperCase();
               const added = existingSymbols.has(item.symbol);
-              const isCoreIndex = CORE_INDEX_SYMBOL_SET.has(item.symbol.toUpperCase());
+              const isCoreIndex = CORE_INDEX_SYMBOL_SET.has(upperSym);
+              const isOptionalIndex = OPTIONAL_INDEX_SYMBOL_SET.has(upperSym);
               return (
                 <div key={item.symbol} className="search-result-row">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -342,10 +345,16 @@ export function WatchlistPanel({
                   <button
                     type="button"
                     className="btn"
-                    disabled={added || isCoreIndex}
+                    disabled={added || isCoreIndex || isOptionalIndex}
                     onClick={() => void handleAdd(item)}
                   >
-                    {isCoreIndex ? '核心指数已监控' : added ? '已添加' : '+ 加入自选'}
+                    {isCoreIndex
+                      ? '核心指数已监控'
+                      : isOptionalIndex
+                        ? '请在设置中开启'
+                        : added
+                          ? '已添加'
+                          : '+ 加入自选'}
                   </button>
                 </div>
               );

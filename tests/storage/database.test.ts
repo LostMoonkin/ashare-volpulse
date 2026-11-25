@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AppDatabase } from '../../src/main/storage/database';
 import type { TradingDayRow } from '../../src/shared/types';
@@ -365,6 +366,85 @@ describe('AppDatabase', () => {
 
     // 非法日期格式应显式报错，防止混合 YYYYMMDD / YYYY-MM-DD 格式静默失效
     expect(() => db.pruneOlderThanTradingDays(30, '20261124')).toThrow(RangeError);
+
+    db.close();
+  });
+
+  it('tracks alert read/unread state, supports mark-one and mark-all by scope, and migrates legacy tables', () => {
+    const dbPath = createTempDbPath();
+
+    // 模拟旧版无 is_read 列的数据库并写入一条历史告警
+    const legacyRaw = new DatabaseSync(dbPath);
+    legacyRaw.exec(`
+      CREATE TABLE alert_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        name TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        minute_index INTEGER NOT NULL,
+        direction TEXT NOT NULL,
+        slope REAL NOT NULL,
+        window_multiple REAL NOT NULL,
+        cum_ratio REAL NOT NULL,
+        message TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO alert_events (
+        symbol, name, trade_date, minute_index, direction,
+        slope, window_multiple, cum_ratio, message, created_at
+      ) VALUES (
+        '000001.SH', '上证指数', '2026-11-24', 30, 'SURGE',
+        3.5, 1.7, 0.12, '旧版历史告警', 1000
+      );
+    `);
+    legacyRaw.close();
+
+    // 使用 AppDatabase 打开旧库：自动迁移 is_read 列且老数据默认未读
+    const db = new AppDatabase(dbPath);
+    const idToday1 = db.insertAlertEvent({
+      symbol: '300750.SZ',
+      name: '宁德时代',
+      tradeDate: '2026-11-25',
+      minuteIndex: 40,
+      direction: 'SURGE',
+      slope: 4.1,
+      windowMultiple: 1.85,
+      cumRatio: 0.19,
+      message: '当日告警 1',
+      createdAt: 2000,
+    });
+    const idToday2 = db.insertAlertEvent({
+      symbol: '600519.SH',
+      name: '贵州茅台',
+      tradeDate: '2026-11-25',
+      minuteIndex: 50,
+      direction: 'SHRINK',
+      slope: -3.4,
+      windowMultiple: 0.55,
+      cumRatio: -0.14,
+      message: '当日告警 2',
+      createdAt: 3000,
+    });
+
+    const initialAll = db.getAlertEvents(undefined, 20);
+    expect(initialAll).toHaveLength(3);
+    expect(initialAll.every((a) => a.isRead === false)).toBe(true);
+
+    // 1. 单条标已读（幂等）
+    expect(db.markAlertEventRead(idToday1)).toBe(true);
+    expect(db.markAlertEventRead(idToday1)).toBe(false);
+    expect(db.getAlertEvents('2026-11-25').find((a) => a.id === idToday1)?.isRead).toBe(true);
+    expect(db.getAlertEvents('2026-11-25').find((a) => a.id === idToday2)?.isRead).toBe(false);
+
+    // 2. 按当日全部已读：仅标记 2026-11-25 剩余未读，不影响昨日历史
+    expect(db.markAllAlertEventsRead('2026-11-25')).toBe(1);
+    expect(db.getAlertEvents('2026-11-25').every((a) => a.isRead)).toBe(true);
+    expect(db.getAlertEvents('2026-11-24')[0].isRead).toBe(false);
+
+    // 3. 全部历史已读：把剩余历史未读全部置为已读
+    expect(db.markAllAlertEventsRead()).toBe(1);
+    expect(db.markAllAlertEventsRead()).toBe(0);
+    expect(db.getAlertEvents(undefined, 20).every((a) => a.isRead)).toBe(true);
 
     db.close();
   });

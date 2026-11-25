@@ -115,6 +115,7 @@ describe('buildEnergyChartDataset', () => {
         cumRatio: 0.25,
         message: `${SIMULATED_ALERT_PREFIX} 快速放量测试`,
         createdAt: Date.now(),
+        isRead: false,
       },
       {
         id: 2,
@@ -128,6 +129,7 @@ describe('buildEnergyChartDataset', () => {
         cumRatio: -0.1,
         message: '上证指数快速缩量',
         createdAt: Date.now(),
+        isRead: true,
       },
     ];
 

@@ -58,6 +58,9 @@ const api: PreloadApi = {
 
   getRecentAlerts: (tradeDate?: string, limit?: number) =>
     ipcRenderer.invoke(IPC_CHANNELS.ALERT_GET_RECENT, tradeDate, limit),
+  markAlertRead: (id: number) => ipcRenderer.invoke(IPC_CHANNELS.ALERT_MARK_READ, id),
+  markAllAlertsRead: (tradeDate?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.ALERT_MARK_ALL_READ, tradeDate),
   simulateAlert: (direction: AlertDirection, symbol?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.ALERT_SIMULATE, direction, symbol),
 

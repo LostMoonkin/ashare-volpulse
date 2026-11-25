@@ -5,6 +5,8 @@ import { formatClockTime, formatSignedPct } from '../utils/format';
 
 export type AlertHistoryScope = 'today' | 'all';
 
+export type AlertReadFilter = 'ALL' | 'UNREAD' | 'READ';
+
 export interface AlertsPanelProps {
   alerts: readonly AlertEventRow[];
   scope: AlertHistoryScope;
@@ -14,6 +16,8 @@ export interface AlertsPanelProps {
   replayTradeDate?: string | null;
   onScopeChange: (scope: AlertHistoryScope) => void;
   onRefresh: () => void;
+  onMarkRead: (id: number) => void;
+  onMarkAllRead: () => void;
   onSimulate: (direction: AlertDirection) => Promise<void>;
   onJumpToChart: (symbol: string) => void;
 }
@@ -27,12 +31,22 @@ export function AlertsPanel({
   replayTradeDate = null,
   onScopeChange,
   onRefresh,
+  onMarkRead,
+  onMarkAllRead,
   onSimulate,
   onJumpToChart,
 }: AlertsPanelProps) {
   const [filter, setFilter] = useState<'ALL' | AlertDirection>('ALL');
+  const [readFilter, setReadFilter] = useState<AlertReadFilter>('ALL');
 
-  const filtered = alerts.filter((item) => (filter === 'ALL' ? true : item.direction === filter));
+  const unreadCount = alerts.reduce((cnt, item) => cnt + (item.isRead ? 0 : 1), 0);
+
+  const filtered = alerts.filter((item) => {
+    if (filter !== 'ALL' && item.direction !== filter) return false;
+    if (readFilter === 'UNREAD' && item.isRead) return false;
+    if (readFilter === 'READ' && !item.isRead) return false;
+    return true;
+  });
 
   return (
     <section className="panel-card">
@@ -41,7 +55,7 @@ export function AlertsPanel({
           {scope === 'today'
             ? `当日异动事件流${tradeDate ? ` (${tradeDate})` : ''}`
             : '全部历史异动事件流'}
-          （点击记录可跳转至对应标的图表）
+          （点击记录可跳转图表并标为已读）
         </span>
         <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
           <div className="segmented-group">
@@ -63,10 +77,33 @@ export function AlertsPanel({
           <div className="segmented-group">
             <button
               type="button"
+              className={`seg-btn ${readFilter === 'ALL' ? 'active' : ''}`}
+              onClick={() => setReadFilter('ALL')}
+            >
+              全部 ({alerts.length})
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${readFilter === 'UNREAD' ? 'active' : ''}`}
+              onClick={() => setReadFilter('UNREAD')}
+            >
+              未读 ({unreadCount})
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${readFilter === 'READ' ? 'active' : ''}`}
+              onClick={() => setReadFilter('READ')}
+            >
+              已读 ({alerts.length - unreadCount})
+            </button>
+          </div>
+          <div className="segmented-group">
+            <button
+              type="button"
               className={`seg-btn ${filter === 'ALL' ? 'active' : ''}`}
               onClick={() => setFilter('ALL')}
             >
-              全部 ({alerts.length})
+              不限方向
             </button>
             <button
               type="button"
@@ -83,6 +120,19 @@ export function AlertsPanel({
               急缩
             </button>
           </div>
+          <button
+            type="button"
+            className="btn btn-accent"
+            disabled={unreadCount === 0}
+            title={
+              scope === 'today'
+                ? '将当日所有未读异动标记为已读'
+                : '将全部历史未读异动标记为已读'
+            }
+            onClick={onMarkAllRead}
+          >
+            {unreadCount > 0 ? `全部已读 (${unreadCount})` : '全部已读'}
+          </button>
           {isDev && !isDayReplay && (
             <>
               <button
@@ -119,7 +169,9 @@ export function AlertsPanel({
 
       {filtered.length === 0 ? (
         <div style={{ color: 'var(--text-secondary)', fontSize: '12px', padding: '16px 0' }}>
-          暂无符合条件的异动告警记录。盘中触发快速放量或快速缩量时将自动记录并推送。
+          {readFilter === 'UNREAD' && alerts.length > 0
+            ? '当前范围内没有未读异动记录。'
+            : '暂无符合条件的异动告警记录。盘中触发快速放量或快速缩量时将自动记录并推送。'}
         </div>
       ) : (
         <div className="alert-list">
@@ -130,31 +182,57 @@ export function AlertsPanel({
             return (
               <div
                 key={item.id}
-                className={`alert-row clickable ${isSurge ? 'surge' : 'shrink'}`}
-                onClick={() => onJumpToChart(item.symbol)}
+                className={`alert-row clickable ${isSurge ? 'surge' : 'shrink'} ${item.isRead ? 'read' : 'unread'}`}
+                onClick={() => {
+                  if (!item.isRead) {
+                    onMarkRead(item.id);
+                  }
+                  onJumpToChart(item.symbol);
+                }}
                 title={`点击定位 ${item.name} (${item.symbol}) 分时对比图`}
               >
                 <div className="alert-row-head">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    {!item.isRead && <span className="unread-dot" aria-label="未读" />}
                     <span className={`badge ${isSurge ? 'badge-up' : 'badge-down'}`}>
                       {isSurge ? '快速放量' : '快速缩量'}
                     </span>
+                    <span
+                      className={`badge badge-compact ${item.isRead ? 'badge-muted' : 'badge-unread'}`}
+                    >
+                      {item.isRead ? '已读' : '未读'}
+                    </span>
                     {isReplay && <span className="badge badge-flat">回放</span>}
                     {isSim && <span className="badge badge-warn">模拟测试</span>}
-                    <strong>
+                    <strong className="alert-row-title">
                       {item.name} ({item.symbol})
                     </strong>
                   </div>
-                  <span className="alert-row-meta">
-                    {item.tradeDate} {formatClockTime(item.createdAt)} · 点击看图 →
-                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {!item.isRead && (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        title="仅标记此条为已读"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMarkRead(item.id);
+                        }}
+                      >
+                        标为已读
+                      </button>
+                    )}
+                    <span className="alert-row-meta">
+                      {item.tradeDate} {formatClockTime(item.createdAt)} · 点击看图 →
+                    </span>
+                  </div>
                 </div>
                 <div className="alert-row-meta">
                   斜率 {formatSignedPct(item.slope, 2)}/分 · 区间倍数{' '}
                   {item.windowMultiple.toFixed(2)}x · 累计同比{' '}
                   {formatSignedPct(item.cumRatio * 100, 1)}
                 </div>
-                <div style={{ fontSize: '12px' }}>{item.message}</div>
+                <div className="alert-row-message">{item.message}</div>
               </div>
             );
           })}

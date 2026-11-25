@@ -21,7 +21,6 @@ import {
   type SymbolTurnoverSnapshot,
 } from '../../core';
 import {
-  CORE_INDICES,
   DEFAULT_POLLING_INTERVAL_SEC,
   DEFAULT_RETENTION_TRADING_DAYS,
   FAILOVER_FAILURE_THRESHOLD,
@@ -32,9 +31,12 @@ import {
   MAX_POLLING_INTERVAL_SEC,
   MIN_POLLING_INTERVAL_SEC,
   MONITORED_INDEX_NAMES,
-  MONITORED_INDEX_SYMBOLS,
   PRIMARY_RECOVERY_PROBE_INTERVAL_MS,
   SETTING_CALENDAR_SYNC_DATE,
+  normalizeEnabledOptionalIndices,
+  resolveDisplayedIndices,
+  resolveMonitoredIndexSymbols,
+  type OptionalIndexSymbol,
 } from '../../shared/constants';
 import type {
   AlertEventInput,
@@ -109,6 +111,7 @@ export interface PollingSchedulerOptions {
   configuredIntervalSec?: number;
   energyConfig?: Partial<EnergyEngineConfig>;
   alertConfig?: Partial<AlertRuleConfig>;
+  enabledOptionalIndices?: readonly OptionalIndexSymbol[];
   /** 仅用于测试注入时钟，默认 Date.now */
   nowFn?: () => number;
   /** 仅用于测试注入等待函数 */
@@ -236,6 +239,7 @@ export class PollingScheduler {
 
   private readonly alertEngine: AlertEngine;
   private energyConfig: EnergyEngineConfig;
+  private enabledOptionalIndices: OptionalIndexSymbol[] = [];
   private configuredIntervalSec: number;
   private effectiveIntervalSec: number;
 
@@ -314,6 +318,7 @@ export class PollingScheduler {
         : {}),
       ...(options.alertConfig ?? {}),
     });
+    this.enabledOptionalIndices = normalizeEnabledOptionalIndices(options.enabledOptionalIndices);
   }
 
   /** 启动调度器并立即执行一次初始化与状态计算 */
@@ -378,6 +383,16 @@ export class PollingScheduler {
         slopeWindow: next.slopeWindow,
       };
     }
+  }
+
+  updateEnabledOptionalIndices(next: readonly OptionalIndexSymbol[]): void {
+    const normalized = normalizeEnabledOptionalIndices(next);
+    const unchanged =
+      normalized.length === this.enabledOptionalIndices.length &&
+      normalized.every((sym, idx) => sym === this.enabledOptionalIndices[idx]);
+    if (unchanged) return;
+    this.enabledOptionalIndices = normalized;
+    this.configRevision += 1;
   }
 
   /** 按优先级执行标的搜索（同花顺权威优先 → 东财快速联想 → 腾讯兜底） */
@@ -899,7 +914,7 @@ export class PollingScheduler {
   }
 
   private collectMonitoredSymbols(watchlistItems: readonly WatchlistItemRow[]): string[] {
-    const result: string[] = [...MONITORED_INDEX_SYMBOLS];
+    const result: string[] = resolveMonitoredIndexSymbols(this.enabledOptionalIndices);
     const seen = new Set<string>(result);
     for (const item of watchlistItems) {
       const sym = item.symbol.trim().toUpperCase();
@@ -1478,8 +1493,10 @@ export class PollingScheduler {
       degradedReasons.push(`MARKET_TOTAL_${marketTotal.degradedReason ?? 'DEGRADED'}`);
     }
 
-    // 2. 计算四大核心指数
-    const indices = CORE_INDICES.map((meta) =>
+    // 2. 计算核心板块指数 + 设置中开启的可选扩展指数
+    const displayedIndices = resolveDisplayedIndices(this.enabledOptionalIndices);
+    const displayedIndexSet = new Set(displayedIndices.map((meta) => meta.symbol));
+    const indices = displayedIndices.map((meta) =>
       this.buildSymbolState({
         symbol: meta.symbol,
         name: meta.name,
@@ -1495,20 +1512,22 @@ export class PollingScheduler {
       })
     );
 
-    // 3. 计算用户自选股
-    const watchlist = watchlistItems.map((item) =>
-      this.buildSymbolState({
-        symbol: item.symbol.trim().toUpperCase(),
-        name: item.name,
-        isIndex: false,
-        symbolOverride: parseWatchlistOverride(item),
-        nowMs,
-        phase,
-        currentMinuteIndex,
-        currentElapsedSec,
-        globalStale: stale,
-      })
-    );
+    // 3. 计算用户自选股（若历史库存在已开启为展示指数的同代码，去重避免重复渲染与告警）
+    const watchlist = watchlistItems
+      .filter((item) => !displayedIndexSet.has(item.symbol.trim().toUpperCase()))
+      .map((item) =>
+        this.buildSymbolState({
+          symbol: item.symbol.trim().toUpperCase(),
+          name: item.name,
+          isIndex: false,
+          symbolOverride: parseWatchlistOverride(item),
+          nowMs,
+          phase,
+          currentMinuteIndex,
+          currentElapsedSec,
+          globalStale: stale,
+        })
+      );
 
     const status: CollectorStatus = {
       mode: this.mode,

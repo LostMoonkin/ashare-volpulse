@@ -96,7 +96,8 @@ export class AppDatabase {
         window_multiple REAL NOT NULL,
         cum_ratio REAL NOT NULL,
         message TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        is_read INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_alert_events_trade_date
@@ -107,6 +108,14 @@ export class AppDatabase {
         value_json TEXT NOT NULL
       );
     `);
+
+    // 兼容旧版数据库平滑迁移：为已有 alert_events 表补充 is_read 列（默认未读 0）
+    const alertColumns = this.db.prepare('PRAGMA table_info(alert_events)').all() as Array<{
+      name: string;
+    }>;
+    if (!alertColumns.some((col) => col.name === 'is_read')) {
+      this.db.exec('ALTER TABLE alert_events ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0;');
+    }
   }
 
   /** 在单个 SQLite 事务中执行操作，异常时自动回滚 */
@@ -452,7 +461,7 @@ export class AppDatabase {
         ? this.db
             .prepare(
               `SELECT id, symbol, name, trade_date, minute_index, direction,
-                      slope, window_multiple, cum_ratio, message, created_at
+                      slope, window_multiple, cum_ratio, message, created_at, is_read
                FROM alert_events
                WHERE trade_date = ?
                ORDER BY created_at DESC, id DESC
@@ -462,7 +471,7 @@ export class AppDatabase {
         : this.db
             .prepare(
               `SELECT id, symbol, name, trade_date, minute_index, direction,
-                      slope, window_multiple, cum_ratio, message, created_at
+                      slope, window_multiple, cum_ratio, message, created_at, is_read
                FROM alert_events
                ORDER BY created_at DESC, id DESC
                LIMIT ?`
@@ -480,6 +489,7 @@ export class AppDatabase {
       cum_ratio: number;
       message: string;
       created_at: number;
+      is_read: number;
     }>;
 
     return rows.map((r) => ({
@@ -494,7 +504,27 @@ export class AppDatabase {
       cumRatio: r.cum_ratio,
       message: r.message,
       createdAt: r.created_at,
+      isRead: r.is_read === 1,
     }));
+  }
+
+  /** 将指定 ID 的异动事件标记为已读 */
+  markAlertEventRead(id: number): boolean {
+    if (!Number.isInteger(id)) return false;
+    const result = this.db
+      .prepare('UPDATE alert_events SET is_read = 1 WHERE id = ? AND is_read = 0')
+      .run(id);
+    return Number(result.changes) > 0;
+  }
+
+  /** 将指定交易日（省略时为全部历史）的所有未读异动事件标记为已读，返回更新条数 */
+  markAllAlertEventsRead(tradeDate?: string): number {
+    const result = tradeDate
+      ? this.db
+          .prepare('UPDATE alert_events SET is_read = 1 WHERE trade_date = ? AND is_read = 0')
+          .run(tradeDate)
+      : this.db.prepare('UPDATE alert_events SET is_read = 1 WHERE is_read = 0').run();
+    return Number(result.changes);
   }
 
   // ---------------------------------------------------------------------------

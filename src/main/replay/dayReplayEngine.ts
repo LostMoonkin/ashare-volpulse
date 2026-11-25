@@ -15,14 +15,16 @@ import {
   type SymbolAlertOverride,
 } from '../../core';
 import {
-  CORE_INDICES,
   DEFAULT_POLLING_INTERVAL_SEC,
   DEFAULT_REPLAY_STEP_MS,
   MARKET_TOTAL_COMPONENTS,
   MARKET_TOTAL_SYMBOL,
   MONITORED_INDEX_NAMES,
-  MONITORED_INDEX_SYMBOLS,
   REPLAY_ALERT_PREFIX,
+  normalizeEnabledOptionalIndices,
+  resolveDisplayedIndices,
+  resolveMonitoredIndexSymbols,
+  type OptionalIndexSymbol,
 } from '../../shared/constants';
 import { hasCybCrossSourceMismatch, toAggregatorBars } from '../../shared/seriesGuards';
 import type {
@@ -61,6 +63,7 @@ export interface DayReplayEngineOptions {
   stepIntervalMs?: number;
   energyConfig?: Partial<EnergyEngineConfig>;
   alertConfig?: Partial<AlertRuleConfig>;
+  enabledOptionalIndices?: readonly OptionalIndexSymbol[];
   onStateUpdate?: (state: MarketDashboardState) => void;
   /** 回放产生的告警（严格内存态，不写实盘 alert_events，不弹系统通知） */
   onReplayAlert?: (payload: AlertDispatchPayload) => void;
@@ -179,6 +182,7 @@ export class DayReplayEngine {
 
   private energyConfig: EnergyEngineConfig;
   private readonly alertEngine: AlertEngine;
+  private enabledOptionalIndices: OptionalIndexSymbol[] = [];
 
   private watchlistItems: WatchlistItemRow[] = [];
   private readonly todayBarsBySymbol = new Map<string, IntradayBarRow[]>();
@@ -215,6 +219,7 @@ export class DayReplayEngine {
         : {}),
       ...(options.alertConfig ?? {}),
     });
+    this.enabledOptionalIndices = normalizeEnabledOptionalIndices(options.enabledOptionalIndices);
 
     this.watchlistItems = this.db.getWatchlist();
     this.preloadRecordedData();
@@ -233,7 +238,31 @@ export class DayReplayEngine {
   }
 
   getReplayAlerts(): AlertEventRow[] {
-    return [...this.replayAlerts];
+    return this.replayAlerts.map((item) => ({ ...item }));
+  }
+
+  markReplayAlertRead(id: number): boolean {
+    let changed = false;
+    this.replayAlerts = this.replayAlerts.map((item) => {
+      if (item.id === id && !item.isRead) {
+        changed = true;
+        return { ...item, isRead: true };
+      }
+      return item;
+    });
+    return changed;
+  }
+
+  markAllReplayAlertsRead(tradeDate?: string): number {
+    let count = 0;
+    this.replayAlerts = this.replayAlerts.map((item) => {
+      if (!item.isRead && (!tradeDate || item.tradeDate === tradeDate)) {
+        count += 1;
+        return { ...item, isRead: true };
+      }
+      return item;
+    });
+    return count;
   }
 
   updateEnergyConfig(next: Partial<EnergyEngineConfig>): void {
@@ -250,8 +279,17 @@ export class DayReplayEngine {
     }
   }
 
+  updateEnabledOptionalIndices(next: readonly OptionalIndexSymbol[]): void {
+    this.enabledOptionalIndices = normalizeEnabledOptionalIndices(next);
+    for (const sym of resolveMonitoredIndexSymbols(this.enabledOptionalIndices)) {
+      if (!this.todayBarsBySymbol.has(sym)) {
+        this.loadRecordedSymbol(sym);
+      }
+    }
+  }
+
   private preloadRecordedData(): void {
-    const symbols = new Set<string>(MONITORED_INDEX_SYMBOLS);
+    const symbols = new Set<string>(resolveMonitoredIndexSymbols(this.enabledOptionalIndices));
     for (const item of this.watchlistItems) {
       symbols.add(item.symbol.trim().toUpperCase());
     }
@@ -289,8 +327,11 @@ export class DayReplayEngine {
 
   private reloadWatchlistAndPreload(): void {
     this.watchlistItems = this.db.getWatchlist();
+    const symbols = new Set<string>(resolveMonitoredIndexSymbols(this.enabledOptionalIndices));
     for (const item of this.watchlistItems) {
-      const sym = item.symbol.trim().toUpperCase();
+      symbols.add(item.symbol.trim().toUpperCase());
+    }
+    for (const sym of symbols) {
       if (!this.todayBarsBySymbol.has(sym)) {
         this.loadRecordedSymbol(sym);
       }
@@ -377,6 +418,7 @@ export class DayReplayEngine {
       const payload: AlertDispatchPayload = {
         ...ev,
         id: this.nextReplayAlertId--,
+        isRead: false,
         message: ev.message.startsWith(REPLAY_ALERT_PREFIX)
           ? ev.message
           : `${REPLAY_ALERT_PREFIX} ${ev.message}`,
@@ -391,7 +433,9 @@ export class DayReplayEngine {
     };
 
     const marketTotal = this.buildMarketTotalStep(minuteIndex, timestampMs, emitReplayAlert);
-    const indices = CORE_INDICES.map((meta) =>
+    const displayedIndices = resolveDisplayedIndices(this.enabledOptionalIndices);
+    const displayedIndexSet = new Set(displayedIndices.map((meta) => meta.symbol));
+    const indices = displayedIndices.map((meta) =>
       this.buildSymbolStep({
         symbol: meta.symbol,
         name: meta.name,
@@ -403,17 +447,19 @@ export class DayReplayEngine {
         emitReplayAlert,
       })
     );
-    const watchlist = this.watchlistItems.map((item) =>
-      this.buildSymbolStep({
-        symbol: item.symbol,
-        name: item.name,
-        isIndex: false,
-        minuteIndex,
-        timestampMs,
-        symbolOverride: parseWatchlistOverride(item),
-        emitReplayAlert,
-      })
-    );
+    const watchlist = this.watchlistItems
+      .filter((item) => !displayedIndexSet.has(item.symbol.trim().toUpperCase()))
+      .map((item) =>
+        this.buildSymbolStep({
+          symbol: item.symbol,
+          name: item.name,
+          isIndex: false,
+          minuteIndex,
+          timestampMs,
+          symbolOverride: parseWatchlistOverride(item),
+          emitReplayAlert,
+        })
+      );
 
     const degradedReasons: string[] = [];
     if (!this.prevTradeDate) {

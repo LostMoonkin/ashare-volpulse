@@ -4,6 +4,7 @@ import {
   MAX_POLLING_INTERVAL_SEC,
   MIN_POLLING_INTERVAL_SEC,
   SETTING_MONITOR_CONFIG,
+  normalizeEnabledOptionalIndices,
 } from '../../shared/constants';
 import type { AlertMatchModeType, MonitorConfig, SlopeWindowOption } from '../../shared/types';
 import type { AppDatabase } from './database';
@@ -20,6 +21,7 @@ export const DEFAULT_MONITOR_CONFIG: MonitorConfig = {
   shrinkMultipleThreshold: 0.65,
   matchMode: 'AND',
   cooldownMinutes: 5,
+  enabledOptionalIndices: [],
 };
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number, digits = 2): number {
@@ -96,6 +98,9 @@ export function sanitizeMonitorConfig(
     ),
     matchMode: normalizeMatchMode(src.matchMode, base.matchMode),
     cooldownMinutes: Math.round(clampNumber(src.cooldownMinutes, 1, 120, base.cooldownMinutes, 0)),
+    enabledOptionalIndices: Array.isArray(src.enabledOptionalIndices)
+      ? normalizeEnabledOptionalIndices(src.enabledOptionalIndices)
+      : normalizeEnabledOptionalIndices(base.enabledOptionalIndices),
   };
 }
 

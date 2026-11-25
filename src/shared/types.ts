@@ -1,4 +1,4 @@
-import type { IndexScopeBadge } from './constants';
+import type { IndexScopeBadge, OptionalIndexSymbol } from './constants';
 
 /**
  * 前后端共享数据类型与 SQLite 持久化行契约
@@ -245,6 +245,8 @@ export interface AlertEventInput {
 
 export interface AlertEventRow extends AlertEventInput {
   id: number;
+  /** 是否已读（新产生告警默认为 false） */
+  isRead: boolean;
 }
 
 /** 经主进程告警通道广播给渲染进程的完整告警载荷 */
@@ -334,6 +336,8 @@ export interface MonitorConfig {
   matchMode: AlertMatchModeType;
   /** 同标的同方向冷却时长（分钟） */
   cooldownMinutes: number;
+  /** 设置中开启展示的可选扩展指数（上证50 / 沪深300 / 中证1000 / 科创50），默认为空（全部关闭） */
+  enabledOptionalIndices: OptionalIndexSymbol[];
 }
 
 /** 单只自选股自定义告警阈值覆写（序列化存入 watchlist.custom_thresholds_json） */

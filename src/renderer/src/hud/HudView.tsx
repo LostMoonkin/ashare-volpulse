@@ -372,10 +372,10 @@ export function HudContent({
           </div>
         </div>
 
-        {/* 四大核心指数精简行：点位、涨跌幅、成交额、口径角标、放缩量徽章 */}
+        {/* 核心板块指数 + 设置中开启的可选指数精简行：点位、涨跌幅、成交额、口径角标、放缩量徽章 */}
         <div className="hud-list-section no-drag">
           <div className="hud-index-list">
-            {(market?.indices ?? []).slice(0, 4).map((item) => {
+            {(market?.indices ?? []).map((item) => {
               const price = resolveSymbolPrice(item);
               const pct = resolveSymbolChangePct(item);
               const turnover = resolveSymbolTurnover(item);

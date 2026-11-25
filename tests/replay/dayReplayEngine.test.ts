@@ -307,5 +307,53 @@ describe('DayReplayEngine', () => {
     });
     const s2 = engine.runAllSteps();
     expect(s2.finalState.watchlist.map((w) => w.symbol)).toEqual(['600519.SH']);
+
+    // 4. 默认仅展示上/深/双创；开启可选扩展指数后应纳入回放输出
+    expect(s2.finalState.indices.map((i) => i.symbol)).toEqual([
+      '000001.SH',
+      '399001.SZ',
+      '399006.SZ',
+      '000680.SH',
+    ]);
+    engine.updateEnabledOptionalIndices(['000016.SH', '000852.SH']);
+    const s3 = engine.runAllSteps();
+    expect(s3.finalState.indices.map((i) => i.symbol)).toEqual([
+      '000001.SH',
+      '399001.SZ',
+      '399006.SZ',
+      '000680.SH',
+      '000016.SH',
+      '000852.SH',
+    ]);
+  });
+
+  it('tracks read/unread state and mark-all-read for in-memory replay alerts', () => {
+    const db = createMemoryDb();
+    db.upsertTradingDays([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+    seedFullTradingDay(db, '2026-11-24');
+    seedFullTradingDay(db, '2026-11-25', { surgeMinuteRange: [40, 50] });
+
+    const engine = new DayReplayEngine({
+      database: db,
+      tradeDate: '2026-11-25',
+      stepIntervalMs: 0,
+    });
+    const summary = engine.runAllSteps();
+    expect(summary.triggeredAlerts.length).toBeGreaterThanOrEqual(2);
+
+    const initial = engine.getReplayAlerts();
+    expect(initial.every((a) => a.isRead === false)).toBe(true);
+
+    const firstId = initial[0].id;
+    expect(engine.markReplayAlertRead(firstId)).toBe(true);
+    expect(engine.markReplayAlertRead(firstId)).toBe(false);
+    expect(engine.getReplayAlerts().find((a) => a.id === firstId)?.isRead).toBe(true);
+
+    const remainingUnread = engine.getReplayAlerts().filter((a) => !a.isRead).length;
+    expect(engine.markAllReplayAlertsRead('2026-11-25')).toBe(remainingUnread);
+    expect(engine.getReplayAlerts().every((a) => a.isRead)).toBe(true);
   });
 });

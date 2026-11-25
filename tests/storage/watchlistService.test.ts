@@ -85,9 +85,14 @@ describe('WatchlistService', () => {
     expect(() => service.add({ symbol: '830799.BJ', name: '北证测试' })).toThrow();
     expect(() => service.add({ symbol: 'INVALID', name: '无效代码' })).toThrow();
 
-    // 五大固定监控指数严禁重复加入自选股
-    for (const idx of ['000001.SH', '399001.SZ', '399006.SZ', '000688.SH', '399106.SZ']) {
+    // 五大基础固定监控指数（含科创综指与深证综指）严禁重复加入自选股
+    for (const idx of ['000001.SH', '399001.SZ', '399006.SZ', '000680.SH', '399106.SZ']) {
       expect(() => service.add({ symbol: idx, name: '核心指数' })).toThrow(/核心大盘指数/);
+    }
+
+    // 四大可选扩展指数引导至设置中开启，避免与展示配置重复
+    for (const idx of ['000016.SH', '000300.SH', '000852.SH', '000688.SH']) {
+      expect(() => service.add({ symbol: idx, name: '扩展指数' })).toThrow(/指数展示配置/);
     }
   });
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MARKET_TOTAL_SYMBOL, MONITORED_INDEX_SYMBOLS } from '../../../shared/constants';
+import { ALL_INDEX_SYMBOLS, MARKET_TOTAL_SYMBOL } from '../../../shared/constants';
 import type {
   AlertDirection,
   AlertEventRow,
@@ -28,7 +28,7 @@ import { EnergyDualChart } from './EnergyDualChart';
 import { SettingsPanel } from './SettingsPanel';
 import { WatchlistPanel } from './WatchlistPanel';
 
-const CORE_INDEX_SET = new Set<string>(MONITORED_INDEX_SYMBOLS);
+const MANAGED_INDEX_SET = new Set<string>(ALL_INDEX_SYMBOLS);
 
 export function DetailView() {
   const [market, setMarket] = useState<MarketDashboardState | null>(null);
@@ -202,17 +202,59 @@ export function DetailView() {
     setWatchlistRows(rows);
     if (
       selectedSymbol !== MARKET_TOTAL_SYMBOL &&
-      !CORE_INDEX_SET.has(selectedSymbol) &&
+      !MANAGED_INDEX_SET.has(selectedSymbol) &&
       !rows.some((r) => r.symbol === selectedSymbol)
     ) {
       setSelectedSymbol(MARKET_TOTAL_SYMBOL);
     }
   };
 
+  // 若用户在设置中关闭了当前正在查看的可选指数，自动安全回退至沪深两市总览
+  useEffect(() => {
+    if (!market || selectedSymbol === MARKET_TOTAL_SYMBOL) return;
+    const stillVisible =
+      market.indices.some((i) => i.symbol === selectedSymbol) ||
+      market.watchlist.some((w) => w.symbol === selectedSymbol);
+    if (!stillVisible) {
+      setSelectedSymbol(MARKET_TOTAL_SYMBOL);
+    }
+  }, [market, selectedSymbol]);
+
   const handleJumpToChart = (symbol: string) => {
     setSelectedSymbol(symbol);
     setActiveTab('chart');
   };
+
+  const handleMarkAlertRead = useCallback(
+    (id: number) => {
+      setAlerts((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, isRead: true } : item))
+      );
+      void window.api.markAlertRead(id).catch(() => {
+        loadAlerts();
+      });
+    },
+    [loadAlerts]
+  );
+
+  const handleMarkAllAlertsRead = useCallback(() => {
+    const targetDate = alertScopeRef.current === 'today' ? activeTradeDateRef.current : undefined;
+    setAlerts((prev) =>
+      prev.map((item) =>
+        !targetDate || item.tradeDate === targetDate ? { ...item, isRead: true } : item
+      )
+    );
+    void window.api
+      .markAllAlertsRead(targetDate)
+      .then(() => {
+        loadAlerts();
+      })
+      .catch(() => {
+        loadAlerts();
+      });
+  }, [loadAlerts]);
+
+  const unreadAlertCount = alerts.reduce((cnt, item) => cnt + (item.isRead ? 0 : 1), 0);
 
   const selectedSnapshot =
     selectedSymbol === MARKET_TOTAL_SYMBOL
@@ -302,7 +344,12 @@ export function DetailView() {
                 loadAlerts();
               }}
             >
-              异动事件流 ({alerts.length})
+              <span>异动事件流 ({alerts.length})</span>
+              {unreadAlertCount > 0 && (
+                <span className="tab-unread-badge" title={`${unreadAlertCount} 条未读异动`}>
+                  {unreadAlertCount}
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -483,6 +530,8 @@ export function DetailView() {
               replayTradeDate={replay?.tradeDate ?? null}
               onScopeChange={setAlertScope}
               onRefresh={() => loadAlerts()}
+              onMarkRead={handleMarkAlertRead}
+              onMarkAllRead={handleMarkAllAlertsRead}
               onSimulate={handleSimulate}
               onJumpToChart={handleJumpToChart}
             />
