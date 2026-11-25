@@ -15,15 +15,18 @@ import {
   type SymbolAlertOverride,
 } from '../../core';
 import {
+  CORE_INDEX_SYMBOLS,
   DEFAULT_POLLING_INTERVAL_SEC,
   DEFAULT_REPLAY_STEP_MS,
   MARKET_TOTAL_COMPONENTS,
   MARKET_TOTAL_SYMBOL,
   MONITORED_INDEX_NAMES,
   REPLAY_ALERT_PREFIX,
+  normalizeEnabledCoreIndices,
   normalizeEnabledOptionalIndices,
   resolveDisplayedIndices,
   resolveMonitoredIndexSymbols,
+  type CoreIndexSymbol,
   type OptionalIndexSymbol,
 } from '../../shared/constants';
 import { hasCybCrossSourceMismatch, toAggregatorBars } from '../../shared/seriesGuards';
@@ -63,6 +66,7 @@ export interface DayReplayEngineOptions {
   stepIntervalMs?: number;
   energyConfig?: Partial<EnergyEngineConfig>;
   alertConfig?: Partial<AlertRuleConfig>;
+  enabledCoreIndices?: readonly CoreIndexSymbol[];
   enabledOptionalIndices?: readonly OptionalIndexSymbol[];
   onStateUpdate?: (state: MarketDashboardState) => void;
   /** 回放产生的告警（严格内存态，不写实盘 alert_events，不弹系统通知） */
@@ -182,6 +186,7 @@ export class DayReplayEngine {
 
   private energyConfig: EnergyEngineConfig;
   private readonly alertEngine: AlertEngine;
+  private enabledCoreIndices: CoreIndexSymbol[] = [...CORE_INDEX_SYMBOLS];
   private enabledOptionalIndices: OptionalIndexSymbol[] = [];
 
   private watchlistItems: WatchlistItemRow[] = [];
@@ -219,6 +224,10 @@ export class DayReplayEngine {
         : {}),
       ...(options.alertConfig ?? {}),
     });
+    this.enabledCoreIndices =
+      options.enabledCoreIndices === undefined
+        ? [...CORE_INDEX_SYMBOLS]
+        : normalizeEnabledCoreIndices(options.enabledCoreIndices);
     this.enabledOptionalIndices = normalizeEnabledOptionalIndices(options.enabledOptionalIndices);
 
     this.watchlistItems = this.db.getWatchlist();
@@ -279,9 +288,24 @@ export class DayReplayEngine {
     }
   }
 
+  updateEnabledCoreIndices(next: readonly CoreIndexSymbol[]): void {
+    this.enabledCoreIndices = normalizeEnabledCoreIndices(next);
+    for (const sym of resolveMonitoredIndexSymbols(
+      this.enabledOptionalIndices,
+      this.enabledCoreIndices
+    )) {
+      if (!this.todayBarsBySymbol.has(sym)) {
+        this.loadRecordedSymbol(sym);
+      }
+    }
+  }
+
   updateEnabledOptionalIndices(next: readonly OptionalIndexSymbol[]): void {
     this.enabledOptionalIndices = normalizeEnabledOptionalIndices(next);
-    for (const sym of resolveMonitoredIndexSymbols(this.enabledOptionalIndices)) {
+    for (const sym of resolveMonitoredIndexSymbols(
+      this.enabledOptionalIndices,
+      this.enabledCoreIndices
+    )) {
       if (!this.todayBarsBySymbol.has(sym)) {
         this.loadRecordedSymbol(sym);
       }
@@ -289,7 +313,9 @@ export class DayReplayEngine {
   }
 
   private preloadRecordedData(): void {
-    const symbols = new Set<string>(resolveMonitoredIndexSymbols(this.enabledOptionalIndices));
+    const symbols = new Set<string>(
+      resolveMonitoredIndexSymbols(this.enabledOptionalIndices, this.enabledCoreIndices)
+    );
     for (const item of this.watchlistItems) {
       symbols.add(item.symbol.trim().toUpperCase());
     }
@@ -327,7 +353,9 @@ export class DayReplayEngine {
 
   private reloadWatchlistAndPreload(): void {
     this.watchlistItems = this.db.getWatchlist();
-    const symbols = new Set<string>(resolveMonitoredIndexSymbols(this.enabledOptionalIndices));
+    const symbols = new Set<string>(
+      resolveMonitoredIndexSymbols(this.enabledOptionalIndices, this.enabledCoreIndices)
+    );
     for (const item of this.watchlistItems) {
       symbols.add(item.symbol.trim().toUpperCase());
     }
@@ -433,7 +461,10 @@ export class DayReplayEngine {
     };
 
     const marketTotal = this.buildMarketTotalStep(minuteIndex, timestampMs, emitReplayAlert);
-    const displayedIndices = resolveDisplayedIndices(this.enabledOptionalIndices);
+    const displayedIndices = resolveDisplayedIndices(
+      this.enabledOptionalIndices,
+      this.enabledCoreIndices
+    );
     const displayedIndexSet = new Set(displayedIndices.map((meta) => meta.symbol));
     const indices = displayedIndices.map((meta) =>
       this.buildSymbolStep({
@@ -776,6 +807,11 @@ export class DayReplayEngine {
         cumTurnover: b.cumTurnover,
         barTurnover: b.barTurnover,
       })),
+      shReference: {
+        todaySeries: [...shTodayVisible],
+        minuteIndex,
+        livePrice: shTodayVisible.length > 0 ? shTodayVisible[shTodayVisible.length - 1].price : null,
+      },
       degraded,
       degradedReason,
     };

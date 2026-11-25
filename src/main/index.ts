@@ -139,6 +139,7 @@ function applyAutoLaunchSetting(enabled: boolean): boolean {
 
 function applyMonitorConfigToScheduler(config: MonitorConfig): void {
   if (replayEngine) {
+    replayEngine.updateEnabledCoreIndices(config.enabledCoreIndices);
     replayEngine.updateEnabledOptionalIndices(config.enabledOptionalIndices);
     replayEngine.updateEnergyConfig({
       expandThresholdPct: config.expandThresholdPct,
@@ -157,6 +158,7 @@ function applyMonitorConfigToScheduler(config: MonitorConfig): void {
     });
   }
   if (!scheduler) return;
+  scheduler.updateEnabledCoreIndices(config.enabledCoreIndices);
   scheduler.updateEnabledOptionalIndices(config.enabledOptionalIndices);
   scheduler.updatePollingInterval(config.pollingIntervalSec);
   scheduler.updateEnergyConfig({
@@ -629,6 +631,7 @@ function initServices(): void {
       database,
       tradeDate: replayCliOptions.tradeDate,
       stepIntervalMs: replayCliOptions.stepIntervalMs,
+      enabledCoreIndices: initialMonitorConfig.enabledCoreIndices,
       enabledOptionalIndices: initialMonitorConfig.enabledOptionalIndices,
       energyConfig: {
         expandThresholdPct: initialMonitorConfig.expandThresholdPct,
@@ -665,6 +668,7 @@ function initServices(): void {
       primaryIntradayProvider: tencentProvider,
       secondaryIntradayProvider: eastmoneyProvider,
       configuredIntervalSec: initialMonitorConfig.pollingIntervalSec,
+      enabledCoreIndices: initialMonitorConfig.enabledCoreIndices,
       enabledOptionalIndices: initialMonitorConfig.enabledOptionalIndices,
       energyConfig: {
         expandThresholdPct: initialMonitorConfig.expandThresholdPct,

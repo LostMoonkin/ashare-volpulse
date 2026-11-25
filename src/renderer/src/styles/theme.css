@@ -1094,6 +1094,13 @@ body,
 }
 
 /* 设置页与表单控件 */
+.index-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
 .optional-index-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

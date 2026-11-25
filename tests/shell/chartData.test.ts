@@ -289,4 +289,30 @@ describe('buildEnergyChartDataset', () => {
     expect(dataset.marginalDevSeries[11]).toBeNull();
     expect(dataset.slopeSeries[11]).toBeNull();
   });
+
+  it('keeps SH index reference price curve on MARKET_TOTAL chart even when 000001.SH is hidden from displayed indices', () => {
+    const base = makeDashboard();
+    const shBars = base.indices.find((i) => i.symbol === '000001.SH')!.todaySeries;
+    const dataset = buildEnergyChartDataset({
+      market: {
+        ...base,
+        indices: [],
+        marketTotal: {
+          ...base.marketTotal,
+          shReference: {
+            todaySeries: shBars,
+            minuteIndex: 122,
+            livePrice: 3566.88,
+          },
+        },
+      },
+      symbol: MARKET_TOTAL_SYMBOL,
+      alerts: [],
+      slopeWindow: 5,
+    });
+
+    expect(dataset.priceSeriesName).toBe('上证点位');
+    expect(dataset.priceSeries[1]).toBeGreaterThan(0);
+    expect(dataset.priceSeries[123]).toBe(3566.88);
+  });
 });

@@ -250,7 +250,7 @@ export function buildEnergyChartDataset(params: {
       }
     }
 
-    // 大盘总成交额右轴叠加「上证指数点位」作为大盘价格走势参照
+    // 大盘总成交额右轴叠加「上证指数点位」作为大盘价格走势参照（即使上证指数卡片被隐藏仍保留）
     const shIndex = market.indices.find((i) => i.symbol === '000001.SH');
     if (shIndex) {
       priceSeriesName = '上证点位';
@@ -258,6 +258,13 @@ export function buildEnergyChartDataset(params: {
         shIndex.todaySeries,
         shIndex.metrics?.minuteIndex ?? null,
         shIndex.quote?.price ?? null
+      );
+    } else if (total.shReference) {
+      priceSeriesName = '上证点位';
+      priceSeries = fillPriceFromBars(
+        total.shReference.todaySeries,
+        total.shReference.minuteIndex,
+        total.shReference.livePrice
       );
     }
   } else {

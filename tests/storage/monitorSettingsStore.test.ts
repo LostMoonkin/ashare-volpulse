@@ -58,6 +58,7 @@ describe('MonitorSettingsStore', () => {
       shrinkMultipleThreshold: 0.55,
       matchMode: 'OR',
       cooldownMinutes: 8,
+      enabledCoreIndices: ['000001.SH', '399001.SZ', '399006.SZ', '000680.SH'],
       enabledOptionalIndices: [],
     });
 
@@ -102,5 +103,43 @@ describe('MonitorSettingsStore', () => {
     const cleared = store.update({ enabledOptionalIndices: [] });
     expect(cleared.enabledOptionalIndices).toEqual([]);
     expect(new MonitorSettingsStore(db).load().enabledOptionalIndices).toEqual([]);
+  });
+
+  it('allows disabling individual or all core indices and preserves legacy configs without enabledCoreIndices', () => {
+    const db = createMemoryDb();
+    // 模拟旧版数据库里不含 enabledCoreIndices 字段的 monitor.config
+    db.setSetting('monitor.config', {
+      pollingIntervalSec: 5,
+      enabledOptionalIndices: ['000688.SH'],
+    });
+
+    const store = new MonitorSettingsStore(db);
+    const loadedLegacy = store.load();
+    expect(loadedLegacy.enabledCoreIndices).toEqual([
+      '000001.SH',
+      '399001.SZ',
+      '399006.SZ',
+      '000680.SH',
+    ]);
+    expect(loadedLegacy.enabledOptionalIndices).toEqual(['000688.SH']);
+
+    // 关闭部分主要指数（乱序与非法代码应自动清洗）
+    const partial = store.update({
+      enabledCoreIndices: [
+        '000680.SH',
+        '000001.SH',
+        '000688.SH',
+      ] as unknown as MonitorConfig['enabledCoreIndices'],
+    });
+    expect(partial.enabledCoreIndices).toEqual(['000001.SH', '000680.SH']);
+    expect(new MonitorSettingsStore(db).load().enabledCoreIndices).toEqual([
+      '000001.SH',
+      '000680.SH',
+    ]);
+
+    // 允许全部 4 个主要指数均设为不展示（空数组 []）
+    const allHidden = store.update({ enabledCoreIndices: [] });
+    expect(allHidden.enabledCoreIndices).toEqual([]);
+    expect(new MonitorSettingsStore(db).load().enabledCoreIndices).toEqual([]);
   });
 });

@@ -325,5 +325,14 @@ describe('HUD minimal mode', () => {
     for (const label of ['上证指数', '深证成指', '创业板指', '科创综指', '上证50', '沪深300', '中证1000', '科创50']) {
       expect(expandedStandardHtml).toContain(label);
     }
+
+    // 当全部指数均被设置为不展示时，标准模式 HUD 不渲染空的指数列表容器
+    const hiddenAllIndicesHtml = renderHud({
+      shell: makeShellState('standard'),
+      market: makeMarketState({ indices: [] }),
+    });
+    expect(hiddenAllIndicesHtml).not.toContain('hud-list-section');
+    expect(hiddenAllIndicesHtml).toContain('沪深两市总成交额');
+    expect(hiddenAllIndicesHtml).toContain('贵州茅台');
   });
 });

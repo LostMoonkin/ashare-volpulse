@@ -1493,6 +1493,14 @@ describe('PollingScheduler', () => {
       ]);
       expect(snapshotBatches[2]).not.toContain('000300.SH');
       expect(snapshotBatches[2]).not.toContain('000688.SH');
+
+      // 4. 关闭全部 4 个主要指数展示后：indices 为空，但两市总成交额聚合与 shReference 依然完整，且不再采集非底层主要指数
+      scheduler.updateEnabledCoreIndices([]);
+      const sAllCoreHidden = await scheduler.refreshNow();
+      expect(sAllCoreHidden.indices).toEqual([]);
+      expect(sAllCoreHidden.marketTotal.cumTurnover).toBe(130e9);
+      expect(sAllCoreHidden.marketTotal.shReference?.todaySeries.length).toBeGreaterThan(0);
+      expect(snapshotBatches[3]).toEqual(['000001.SH', '399106.SZ']);
     } finally {
       db.close();
     }

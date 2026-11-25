@@ -44,6 +44,15 @@ export const CORE_INDICES: readonly CoreIndexMeta[] = [
   },
 ] as const;
 
+export const CORE_INDEX_SYMBOLS = [
+  '000001.SH',
+  '399001.SZ',
+  '399006.SZ',
+  '000680.SH',
+] as const;
+
+export type CoreIndexSymbol = (typeof CORE_INDEX_SYMBOLS)[number];
+
 /** 可选扩展展示指数元数据（默认关闭，可在设置中按需开启） */
 export const OPTIONAL_INDICES: readonly CoreIndexMeta[] = [
   {
@@ -109,7 +118,24 @@ export const MONITORED_INDEX_NAMES: Readonly<Record<string, string>> = {
   '000688.SH': '科创50',
 };
 
+const CORE_INDEX_SYMBOL_SET = new Set<string>(CORE_INDEX_SYMBOLS);
 const OPTIONAL_INDEX_SYMBOL_SET = new Set<string>(OPTIONAL_INDEX_SYMBOLS);
+
+/** 规范化已启用的主要板块指数列表（过滤非法值、去重并保持固定展示顺序） */
+export function normalizeEnabledCoreIndices(
+  raw: readonly unknown[] | null | undefined
+): CoreIndexSymbol[] {
+  if (!Array.isArray(raw)) return [...CORE_INDEX_SYMBOLS];
+  const enabled = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const upper = item.trim().toUpperCase();
+    if (CORE_INDEX_SYMBOL_SET.has(upper)) {
+      enabled.add(upper);
+    }
+  }
+  return CORE_INDEX_SYMBOLS.filter((sym) => enabled.has(sym));
+}
 
 /** 规范化已启用的可选指数列表（过滤非法值、去重并保持固定展示顺序） */
 export function normalizeEnabledOptionalIndices(
@@ -127,23 +153,48 @@ export function normalizeEnabledOptionalIndices(
   return OPTIONAL_INDEX_SYMBOLS.filter((sym) => enabled.has(sym));
 }
 
-/** 按配置解析当前面板应展示的指数列表（固定核心 4 指数 + 已开启的可选指数） */
+/** 按配置解析当前面板应展示的指数列表（已启用的主要板块指数 + 已启用的可选扩展指数） */
 export function resolveDisplayedIndices(
-  enabledOptionalIndices?: readonly string[]
+  enabledOptionalIndices?: readonly string[],
+  enabledCoreIndices?: readonly string[]
 ): CoreIndexMeta[] {
-  const enabledSet = new Set<string>(normalizeEnabledOptionalIndices(enabledOptionalIndices));
+  const enabledCoreSet = new Set<string>(
+    enabledCoreIndices === undefined
+      ? CORE_INDEX_SYMBOLS
+      : normalizeEnabledCoreIndices(enabledCoreIndices)
+  );
+  const enabledOptionalSet = new Set<string>(
+    normalizeEnabledOptionalIndices(enabledOptionalIndices)
+  );
   return [
-    ...CORE_INDICES,
-    ...OPTIONAL_INDICES.filter((meta) => enabledSet.has(meta.symbol)),
+    ...CORE_INDICES.filter((meta) => enabledCoreSet.has(meta.symbol)),
+    ...OPTIONAL_INDICES.filter((meta) => enabledOptionalSet.has(meta.symbol)),
   ];
 }
 
-/** 按配置解析当前调度器应采集的指数代码集合（必采 5 指数 + 已开启的可选指数） */
+/**
+ * 按配置解析当前调度器应采集的指数代码集合：
+ * - 始终保留 000001.SH 与 399106.SZ（两市总成交额聚合与右轴上证点位的硬不变量）
+ * - 叠加当前已开启展示的主要板块指数与可选扩展指数（关闭展示的非底层指数不浪费请求）
+ */
 export function resolveMonitoredIndexSymbols(
-  enabledOptionalIndices?: readonly string[]
+  enabledOptionalIndices?: readonly string[],
+  enabledCoreIndices?: readonly string[]
 ): string[] {
+  const core =
+    enabledCoreIndices === undefined
+      ? [...CORE_INDEX_SYMBOLS]
+      : normalizeEnabledCoreIndices(enabledCoreIndices);
   const optional = normalizeEnabledOptionalIndices(enabledOptionalIndices);
-  return [...MONITORED_INDEX_SYMBOLS, ...optional];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const sym of [...MARKET_TOTAL_COMPONENTS, ...core, ...optional]) {
+    if (!seen.has(sym)) {
+      seen.add(sym);
+      result.push(sym);
+    }
+  }
+  return result;
 }
 
 /** 盘中轮询频率与退避预算（依据 Phase 0 压测结论） */

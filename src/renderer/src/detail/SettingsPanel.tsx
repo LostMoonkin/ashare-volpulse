@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ALLOWED_SLOPE_WINDOWS,
   CORE_INDICES,
+  CORE_INDEX_SYMBOLS,
   OPTIONAL_INDICES,
+  normalizeEnabledCoreIndices,
   normalizeEnabledOptionalIndices,
+  type CoreIndexSymbol,
   type OptionalIndexSymbol,
 } from '../../../shared/constants';
 import type {
@@ -182,9 +185,24 @@ export function SettingsPanel({
     void applyMonitorPatch(payload);
   };
 
+  const enabledCoreSet = new Set<string>(
+    monitorConfig?.enabledCoreIndices ?? draft?.enabledCoreIndices ?? CORE_INDEX_SYMBOLS
+  );
+
   const enabledOptionalSet = new Set<string>(
     monitorConfig?.enabledOptionalIndices ?? draft?.enabledOptionalIndices ?? []
   );
+
+  const handleToggleCoreIndex = (symbol: CoreIndexSymbol, enabled: boolean) => {
+    const nextSet = new Set(enabledCoreSet);
+    if (enabled) {
+      nextSet.add(symbol);
+    } else {
+      nextSet.delete(symbol);
+    }
+    const nextList = normalizeEnabledCoreIndices([...nextSet]);
+    void applyMonitorPatch({ enabledCoreIndices: nextList });
+  };
 
   const handleToggleOptionalIndex = (symbol: OptionalIndexSymbol, enabled: boolean) => {
     const nextSet = new Set(enabledOptionalSet);
@@ -262,14 +280,44 @@ export function SettingsPanel({
         <h2 className="panel-title">
           <span>指数展示配置（勾选即刻生效并持久化）</span>
           <span className="badge badge-muted">
-            已开启 {enabledOptionalSet.size}/{OPTIONAL_INDICES.length} 项扩展指数
+            已展示 {enabledCoreSet.size + enabledOptionalSet.size}/
+            {CORE_INDICES.length + OPTIONAL_INDICES.length} 项指数
           </span>
         </h2>
         <div className="setting-desc" style={{ marginBottom: '10px' }}>
-          面板默认固定展示「上、深、双创」全市场板块指数：
-          {CORE_INDICES.map((idx) => `${idx.name} (${idx.symbol})`).join('、')}
-          。以下宽基成分股指数默认关闭，按需开启后会同步接入实时快照、分时能量图与异动提醒（不参与两市总成交额累加）。
+          所有主要板块指数与扩展宽基指数均可独立开关展示；关闭上证指数展示不会影响顶部「沪深两市总成交额」计算与两市分时图右轴点位参照（以下指数均不参与两市总成交额重复累加）。
         </div>
+
+        <div className="index-group-label">主要板块指数（默认开启，可设为不展示）</div>
+        <div className="optional-index-grid" style={{ marginBottom: '10px' }}>
+          {CORE_INDICES.map((idx) => {
+            const symbol = idx.symbol as CoreIndexSymbol;
+            const checked = enabledCoreSet.has(symbol);
+            return (
+              <label
+                key={idx.symbol}
+                className={`optional-index-card ${checked ? 'active' : ''}`}
+              >
+                <div className="optional-index-head">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={savingMonitor}
+                      onChange={(e) => handleToggleCoreIndex(symbol, e.target.checked)}
+                    />
+                    <strong>{idx.name}</strong>
+                    <span className="scope-tag">{idx.scope}</span>
+                  </div>
+                  <span className="muted-mono">{idx.symbol}</span>
+                </div>
+                <div className="setting-desc">{idx.scopeDetail}</div>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="index-group-label">扩展宽基指数（默认关闭，按需开启）</div>
         <div className="optional-index-grid">
           {OPTIONAL_INDICES.map((idx) => {
             const symbol = idx.symbol as OptionalIndexSymbol;

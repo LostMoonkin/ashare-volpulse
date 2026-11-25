@@ -87,7 +87,7 @@ export class WatchlistService {
   add(input: WatchlistAddInput): WatchlistItemRow[] {
     const symbol = normalizeThscode(input.symbol);
     if (CORE_INDEX_SYMBOL_SET.has(symbol)) {
-      throw new Error(`核心大盘指数 ${symbol} 已在顶部固定监控，无需重复加入自选股`);
+      throw new Error(`核心大盘指数 ${symbol} 由「设置 → 指数展示配置」统一管理，无需加入自选股`);
     }
     if (OPTIONAL_INDEX_SYMBOL_SET.has(symbol)) {
       throw new Error(`扩展指数 ${symbol} 请在「设置 → 指数展示配置」中开启，无需加入自选股`);

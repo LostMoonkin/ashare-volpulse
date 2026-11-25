@@ -1,9 +1,11 @@
 import {
   ALLOWED_SLOPE_WINDOWS,
+  CORE_INDEX_SYMBOLS,
   DEFAULT_POLLING_INTERVAL_SEC,
   MAX_POLLING_INTERVAL_SEC,
   MIN_POLLING_INTERVAL_SEC,
   SETTING_MONITOR_CONFIG,
+  normalizeEnabledCoreIndices,
   normalizeEnabledOptionalIndices,
 } from '../../shared/constants';
 import type { AlertMatchModeType, MonitorConfig, SlopeWindowOption } from '../../shared/types';
@@ -21,6 +23,7 @@ export const DEFAULT_MONITOR_CONFIG: MonitorConfig = {
   shrinkMultipleThreshold: 0.65,
   matchMode: 'AND',
   cooldownMinutes: 5,
+  enabledCoreIndices: [...CORE_INDEX_SYMBOLS],
   enabledOptionalIndices: [],
 };
 
@@ -98,6 +101,9 @@ export function sanitizeMonitorConfig(
     ),
     matchMode: normalizeMatchMode(src.matchMode, base.matchMode),
     cooldownMinutes: Math.round(clampNumber(src.cooldownMinutes, 1, 120, base.cooldownMinutes, 0)),
+    enabledCoreIndices: Array.isArray(src.enabledCoreIndices)
+      ? normalizeEnabledCoreIndices(src.enabledCoreIndices)
+      : normalizeEnabledCoreIndices(base.enabledCoreIndices),
     enabledOptionalIndices: Array.isArray(src.enabledOptionalIndices)
       ? normalizeEnabledOptionalIndices(src.enabledOptionalIndices)
       : normalizeEnabledOptionalIndices(base.enabledOptionalIndices),

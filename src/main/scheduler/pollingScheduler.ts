@@ -21,6 +21,7 @@ import {
   type SymbolTurnoverSnapshot,
 } from '../../core';
 import {
+  CORE_INDEX_SYMBOLS,
   DEFAULT_POLLING_INTERVAL_SEC,
   DEFAULT_RETENTION_TRADING_DAYS,
   FAILOVER_FAILURE_THRESHOLD,
@@ -34,9 +35,11 @@ import {
   PRIMARY_RECOVERY_PROBE_INTERVAL_MS,
   SETTING_CALENDAR_SYNC_DATE,
   SETTING_POST_CLOSE_RECONCILED,
+  normalizeEnabledCoreIndices,
   normalizeEnabledOptionalIndices,
   resolveDisplayedIndices,
   resolveMonitoredIndexSymbols,
+  type CoreIndexSymbol,
   type OptionalIndexSymbol,
 } from '../../shared/constants';
 import type {
@@ -120,6 +123,7 @@ export interface PollingSchedulerOptions {
   configuredIntervalSec?: number;
   energyConfig?: Partial<EnergyEngineConfig>;
   alertConfig?: Partial<AlertRuleConfig>;
+  enabledCoreIndices?: readonly CoreIndexSymbol[];
   enabledOptionalIndices?: readonly OptionalIndexSymbol[];
   /** 仅用于测试注入时钟，默认 Date.now */
   nowFn?: () => number;
@@ -248,6 +252,7 @@ export class PollingScheduler {
 
   private readonly alertEngine: AlertEngine;
   private energyConfig: EnergyEngineConfig;
+  private enabledCoreIndices: CoreIndexSymbol[] = [...CORE_INDEX_SYMBOLS];
   private enabledOptionalIndices: OptionalIndexSymbol[] = [];
   private configuredIntervalSec: number;
   private effectiveIntervalSec: number;
@@ -332,6 +337,10 @@ export class PollingScheduler {
         : {}),
       ...(options.alertConfig ?? {}),
     });
+    this.enabledCoreIndices =
+      options.enabledCoreIndices === undefined
+        ? [...CORE_INDEX_SYMBOLS]
+        : normalizeEnabledCoreIndices(options.enabledCoreIndices);
     this.enabledOptionalIndices = normalizeEnabledOptionalIndices(options.enabledOptionalIndices);
   }
 
@@ -397,6 +406,16 @@ export class PollingScheduler {
         slopeWindow: next.slopeWindow,
       };
     }
+  }
+
+  updateEnabledCoreIndices(next: readonly CoreIndexSymbol[]): void {
+    const normalized = normalizeEnabledCoreIndices(next);
+    const unchanged =
+      normalized.length === this.enabledCoreIndices.length &&
+      normalized.every((sym, idx) => sym === this.enabledCoreIndices[idx]);
+    if (unchanged) return;
+    this.enabledCoreIndices = normalized;
+    this.configRevision += 1;
   }
 
   updateEnabledOptionalIndices(next: readonly OptionalIndexSymbol[]): void {
@@ -1075,7 +1094,10 @@ export class PollingScheduler {
   }
 
   private collectMonitoredSymbols(watchlistItems: readonly WatchlistItemRow[]): string[] {
-    const result: string[] = resolveMonitoredIndexSymbols(this.enabledOptionalIndices);
+    const result: string[] = resolveMonitoredIndexSymbols(
+      this.enabledOptionalIndices,
+      this.enabledCoreIndices
+    );
     const seen = new Set<string>(result);
     for (const item of watchlistItems) {
       const sym = item.symbol.trim().toUpperCase();
@@ -1674,8 +1696,11 @@ export class PollingScheduler {
       degradedReasons.push(`MARKET_TOTAL_${marketTotal.degradedReason ?? 'DEGRADED'}`);
     }
 
-    // 2. 计算核心板块指数 + 设置中开启的可选扩展指数
-    const displayedIndices = resolveDisplayedIndices(this.enabledOptionalIndices);
+    // 2. 计算已开启展示的主要板块指数 + 可选扩展指数
+    const displayedIndices = resolveDisplayedIndices(
+      this.enabledOptionalIndices,
+      this.enabledCoreIndices
+    );
     const displayedIndexSet = new Set(displayedIndices.map((meta) => meta.symbol));
     const indices = displayedIndices.map((meta) =>
       this.buildSymbolState({
@@ -1942,6 +1967,11 @@ export class PollingScheduler {
         cumTurnover: b.cumTurnover,
         barTurnover: b.barTurnover,
       })),
+      shReference: {
+        todaySeries: [...shTodayBars],
+        minuteIndex: metrics?.minuteIndex ?? currentMinuteIndex,
+        livePrice: this.mode === 'LIVE' ? (this.latestSnapshots.get(shSym)?.price ?? null) : null,
+      },
       degraded,
       degradedReason,
     };

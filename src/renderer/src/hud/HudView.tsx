@@ -372,39 +372,41 @@ export function HudContent({
           </div>
         </div>
 
-        {/* 核心板块指数 + 设置中开启的可选指数精简行：点位、涨跌幅、成交额、口径角标、放缩量徽章 */}
-        <div className="hud-list-section no-drag">
-          <div className="hud-index-list">
-            {(market?.indices ?? []).map((item) => {
-              const price = resolveSymbolPrice(item);
-              const pct = resolveSymbolChangePct(item);
-              const turnover = resolveSymbolTurnover(item);
-              const badge = formatVolumeState(item.metrics?.volumeState);
-              const toneClass = getSignedToneClass(pct);
-              return (
-                <div
-                  key={item.symbol}
-                  className="hud-quote-row"
-                  onClick={() => onOpenDetail({ symbol: item.symbol, tab: 'chart' })}
-                  title={`点击查看 ${item.name} 分时对比图`}
-                >
-                  <div className="hud-quote-name">
-                    <span className="quote-title">{item.name}</span>
-                    {item.scope && <span className="scope-tag">{item.scope}</span>}
+        {/* 已开启展示的板块与宽基指数精简行（若全部关闭则自动隐藏该区块，把空间让给自选股） */}
+        {(market?.indices ?? []).length > 0 && (
+          <div className="hud-list-section no-drag">
+            <div className="hud-index-list">
+              {(market?.indices ?? []).map((item) => {
+                const price = resolveSymbolPrice(item);
+                const pct = resolveSymbolChangePct(item);
+                const turnover = resolveSymbolTurnover(item);
+                const badge = formatVolumeState(item.metrics?.volumeState);
+                const toneClass = getSignedToneClass(pct);
+                return (
+                  <div
+                    key={item.symbol}
+                    className="hud-quote-row"
+                    onClick={() => onOpenDetail({ symbol: item.symbol, tab: 'chart' })}
+                    title={`点击查看 ${item.name} 分时对比图`}
+                  >
+                    <div className="hud-quote-name">
+                      <span className="quote-title">{item.name}</span>
+                      {item.scope && <span className="scope-tag">{item.scope}</span>}
+                    </div>
+                    <span className="hud-quote-price">{formatPrice(price)}</span>
+                    <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
+                    <span className="hud-quote-turn">
+                      {turnover !== null ? formatTurnover(turnover) : '降级'}
+                    </span>
+                    <span className={`badge badge-compact badge-${item.degraded && turnover === null ? 'warn' : badge.tone}`}>
+                      {item.degraded && turnover === null ? '降级' : badge.label}
+                    </span>
                   </div>
-                  <span className="hud-quote-price">{formatPrice(price)}</span>
-                  <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
-                  <span className="hud-quote-turn">
-                    {turnover !== null ? formatTurnover(turnover) : '降级'}
-                  </span>
-                  <span className={`badge badge-compact badge-${item.degraded && turnover === null ? 'warn' : badge.tone}`}>
-                    {item.degraded && turnover === null ? '降级' : badge.label}
-                  </span>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* 自选股精简列表（可滚动 / 可折叠） */}
         <div className={`hud-watchlist-section no-drag ${watchlistExpanded ? '' : 'collapsed'}`}>

@@ -349,7 +349,7 @@ export function WatchlistPanel({
                     onClick={() => void handleAdd(item)}
                   >
                     {isCoreIndex
-                      ? '核心指数已监控'
+                      ? '请在设置中配置'
                       : isOptionalIndex
                         ? '请在设置中开启'
                         : added

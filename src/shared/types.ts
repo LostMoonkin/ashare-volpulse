@@ -1,4 +1,4 @@
-import type { IndexScopeBadge, OptionalIndexSymbol } from './constants';
+import type { CoreIndexSymbol, IndexScopeBadge, OptionalIndexSymbol } from './constants';
 
 /**
  * 前后端共享数据类型与 SQLite 持久化行契约
@@ -135,6 +135,12 @@ export interface MarketTotalState {
   metrics: SymbolEnergyMetricsView | null;
   todaySeries: MarketTotalBarPoint[];
   prevSeries: MarketTotalBarPoint[];
+  /** 上证指数点位参考（用于当上证指数卡片被隐藏时，沪深两市分时图右轴仍可叠加「上证点位」） */
+  shReference?: {
+    todaySeries: IntradayBarRow[];
+    minuteIndex: number | null;
+    livePrice: number | null;
+  } | null;
   degraded: boolean;
   degradedReason: string | null;
 }
@@ -336,6 +342,8 @@ export interface MonitorConfig {
   matchMode: AlertMatchModeType;
   /** 同标的同方向冷却时长（分钟） */
   cooldownMinutes: number;
+  /** 设置中开启展示的主要板块指数（上证 / 深证成指 / 创业板指 / 科创综指），默认全部开启，可逐项关闭 */
+  enabledCoreIndices: CoreIndexSymbol[];
   /** 设置中开启展示的可选扩展指数（上证50 / 沪深300 / 中证1000 / 科创50），默认为空（全部关闭） */
   enabledOptionalIndices: OptionalIndexSymbol[];
 }
