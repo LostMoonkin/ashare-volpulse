@@ -27,7 +27,7 @@ interface ToneStep {
  * - SURGE（急放）：上行明快三连脉冲（D5 → A5 → D6），快速上升感
  * - SHRINK（急缩）：下行沉稳双音（A4 → D4），低沉收敛感
  */
-const ALERT_TONE_PATTERNS: Record<AlertDirection, readonly ToneStep[]> = {
+export const ALERT_TONE_PATTERNS: Record<AlertDirection, readonly ToneStep[]> = {
   SURGE: [
     { frequency: 587.33, startOffsetSec: 0, durationSec: 0.085, type: 'triangle', peakGain: 0.16 },
     { frequency: 880.0, startOffsetSec: 0.095, durationSec: 0.085, type: 'triangle', peakGain: 0.18 },
@@ -39,6 +39,31 @@ const ALERT_TONE_PATTERNS: Record<AlertDirection, readonly ToneStep[]> = {
   ],
 };
 
+const RESUME_TIMEOUT_MS = 500;
+
+async function resumeWithTimeout(ctx: AudioContext): Promise<boolean> {
+  if (ctx.state !== 'suspended') return true;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const outcome = await Promise.race([
+      ctx.resume().then(() => 'resumed' as const),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), RESUME_TIMEOUT_MS);
+      }),
+    ]);
+    return outcome === 'resumed';
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** 仅供单元测试重置全局 AudioContext 单例 */
+export function resetAudioContextForTest(): void {
+  sharedAudioContext = null;
+}
+
 /** 播放区分急放 / 急缩的短提示音；静音态不发声 */
 export async function playAlertSound(direction: AlertDirection, muted: boolean): Promise<boolean> {
   if (muted) return false;
@@ -46,9 +71,8 @@ export async function playAlertSound(direction: AlertDirection, muted: boolean):
   if (!ctx) return false;
 
   try {
-    if (ctx.state === 'suspended') {
-      await ctx.resume();
-    }
+    const ready = await resumeWithTimeout(ctx);
+    if (!ready) return false;
 
     const baseTime = ctx.currentTime + 0.01;
     const steps = ALERT_TONE_PATTERNS[direction];

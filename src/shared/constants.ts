@@ -109,7 +109,7 @@ export const DEFAULT_BOSS_KEY = 'Alt+Shift+A';
 
 /** 双态窗口默认尺寸（像素） */
 export const HUD_DEFAULT_WIDTH = 376;
-export const HUD_DEFAULT_HEIGHT = 336;
+export const HUD_DEFAULT_HEIGHT = 388;
 export const DETAIL_DEFAULT_WIDTH = 860;
 export const DETAIL_DEFAULT_HEIGHT = 580;
 export const DETAIL_MIN_WIDTH = 720;

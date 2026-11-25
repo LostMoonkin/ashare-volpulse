@@ -1,4 +1,10 @@
-export { BossKeyManager, type BossKeyManagerOptions, type GlobalShortcutApi } from './bossKeyManager';
+export {
+  BossKeyManager,
+  normalizeAccelerator,
+  type BossKeyManagerOptions,
+  type GlobalShortcutApi,
+  type NormalizedAcceleratorResult,
+} from './bossKeyManager';
 export {
   generateTrayIconPng,
   getTrayNativeImage,

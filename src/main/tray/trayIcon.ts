@@ -104,17 +104,21 @@ function setPixel(rgba: Uint8Array, size: number, x: number, y: number, color: R
 }
 
 /**
- * 纯代码生成 32x32 暗底圆角能量柱 PNG（无外部图片依赖，跨 DPI 清晰显示）。
+ * 纯代码生成暗底圆角能量柱 PNG（默认 32x32，支持 16/32 多分辨率跨 DPI 清晰显示）。
  */
-export function generateTrayIconPng(mood: TrayIconMood): Buffer {
-  const size = 32;
-  const rgba = new Uint8Array(size * size * 4);
+export function generateTrayIconPng(mood: TrayIconMood, size = 32): Buffer {
+  const pixelSize = Math.max(16, Math.round(size));
+  const rgba = new Uint8Array(pixelSize * pixelSize * 4);
   const { primary, accent } = MOOD_COLORS[mood];
+  const scale = pixelSize / 32;
 
-  const radius = 6;
+  const radius = Math.max(2, Math.round(6 * scale));
+  const borderInset = Math.max(1, Math.round(1 * scale));
+  const bgInset = Math.max(borderInset + 1, Math.round(2 * scale));
+
   const isInsideRoundedRect = (x: number, y: number, inset: number): boolean => {
     const min = inset;
-    const max = size - 1 - inset;
+    const max = pixelSize - 1 - inset;
     if (x < min || x > max || y < min || y > max) return false;
     const r = Math.max(1, radius - inset);
     const dx = x < min + r ? min + r - x : x > max - r ? x - (max - r) : 0;
@@ -122,33 +126,48 @@ export function generateTrayIconPng(mood: TrayIconMood): Buffer {
     return dx * dx + dy * dy <= r * r;
   };
 
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      if (isInsideRoundedRect(x, y, 2)) {
-        setPixel(rgba, size, x, y, BG_COLOR);
-      } else if (isInsideRoundedRect(x, y, 1)) {
-        setPixel(rgba, size, x, y, BORDER_COLOR);
+  for (let y = 0; y < pixelSize; y++) {
+    for (let x = 0; x < pixelSize; x++) {
+      if (isInsideRoundedRect(x, y, bgInset)) {
+        setPixel(rgba, pixelSize, x, y, BG_COLOR);
+      } else if (isInsideRoundedRect(x, y, borderInset)) {
+        setPixel(rgba, pixelSize, x, y, BORDER_COLOR);
       }
     }
   }
 
-  // 绘制三根渐高能量柱（表示盘中量能脉冲）
+  // 绘制三根渐高能量柱（按比例适配 16x16 与 32x32）
   const bars: Array<{ x0: number; x1: number; topY: number; color: RgbaColor }> = [
-    { x0: 6, x1: 11, topY: 17, color: primary },
-    { x0: 13, x1: 18, topY: 12, color: primary },
-    { x0: 20, x1: 25, topY: 7, color: accent },
+    {
+      x0: Math.round(6 * scale),
+      x1: Math.round(11 * scale),
+      topY: Math.round(17 * scale),
+      color: primary,
+    },
+    {
+      x0: Math.round(13 * scale),
+      x1: Math.round(18 * scale),
+      topY: Math.round(12 * scale),
+      color: primary,
+    },
+    {
+      x0: Math.round(20 * scale),
+      x1: Math.round(25 * scale),
+      topY: Math.round(7 * scale),
+      color: accent,
+    },
   ];
-  const bottomY = 25;
+  const bottomY = Math.round(25 * scale);
 
   for (const bar of bars) {
     for (let y = bar.topY; y <= bottomY; y++) {
       for (let x = bar.x0; x <= bar.x1; x++) {
-        setPixel(rgba, size, x, y, bar.color);
+        setPixel(rgba, pixelSize, x, y, bar.color);
       }
     }
   }
 
-  return encodeRgbaToPng(size, size, rgba);
+  return encodeRgbaToPng(pixelSize, pixelSize, rgba);
 }
 
 export function resolveTrayIconMood(state: MarketDashboardState | null): TrayIconMood {
@@ -167,8 +186,18 @@ const iconCache = new Map<TrayIconMood, NativeImage>();
 export function getTrayNativeImage(mood: TrayIconMood): NativeImage {
   const cached = iconCache.get(mood);
   if (cached) return cached;
-  const png = generateTrayIconPng(mood);
-  const img = nativeImage.createFromBuffer(png).resize({ width: 16, height: 16 });
+  const png1x = generateTrayIconPng(mood, 16);
+  const png2x = generateTrayIconPng(mood, 32);
+
+  let img: NativeImage;
+  if (typeof nativeImage.createEmpty === 'function') {
+    img = nativeImage.createEmpty();
+    img.addRepresentation({ scaleFactor: 1.0, width: 16, height: 16, buffer: png1x });
+    img.addRepresentation({ scaleFactor: 2.0, width: 32, height: 32, buffer: png2x });
+  } else {
+    img = nativeImage.createFromBuffer(png2x, { scaleFactor: 2.0 });
+  }
+
   iconCache.set(mood, img);
   return img;
 }

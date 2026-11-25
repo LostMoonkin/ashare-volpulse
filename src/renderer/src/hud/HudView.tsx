@@ -136,102 +136,115 @@ export function HudView() {
           </div>
         </header>
 
-        {/* 老板键冲突提示 */}
-        {shell?.bossKeyStatus.conflictMessage && (
-          <div
-            className="hud-conflict-banner no-drag"
-            role="alert"
-            onClick={() => void window.api.openDetail({ tab: 'settings' })}
-            title="点击前往设置改绑老板键"
-          >
-            ⚠ {shell.bossKeyStatus.conflictMessage}
-          </div>
-        )}
+        {/* 中间内容区：独立承载横幅与行情卡片，保证极端双横幅同时出现也不裁切底部状态栏 */}
+        <div className="hud-content no-drag">
+          {/* 老板键冲突提示 */}
+          {shell?.bossKeyStatus.conflictMessage && (
+            <div
+              className="hud-conflict-banner"
+              role="alert"
+              onClick={() => void window.api.openDetail({ tab: 'settings' })}
+              title="点击前往设置改绑老板键"
+            >
+              ⚠ {shell.bossKeyStatus.conflictMessage}
+            </div>
+          )}
 
-        {/* 核心 Hero 区：沪深两市总成交额 */}
-        <div
-          className="hud-hero no-drag"
-          onClick={() => void window.api.openDetail({ symbol: MARKET_TOTAL_SYMBOL, tab: 'chart' })}
-          title="点击展开详情浮层"
-        >
-          <div className="hud-hero-top">
-            <span className="hud-hero-label">沪深两市总成交额（沪+深，不含北证）</span>
-            <div style={{ display: 'flex', gap: '4px' }}>
-              {isDegraded && <span className="badge badge-warn">{status?.stale ? '陈旧' : '降级'}</span>}
-              <span className={`badge badge-${volBadge.tone}`}>{volBadge.label}</span>
+          {/* 核心 Hero 区：沪深两市总成交额 */}
+          <div
+            className="hud-hero"
+            onClick={() => void window.api.openDetail({ symbol: MARKET_TOTAL_SYMBOL, tab: 'chart' })}
+            title="点击展开详情浮层"
+          >
+            <div className="hud-hero-top">
+              <span className="hud-hero-label">沪深两市总成交额（沪+深，不含北证）</span>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                {isDegraded && (
+                  <span className="badge badge-warn">{status?.stale ? '陈旧' : '降级'}</span>
+                )}
+                <span className={`badge badge-${volBadge.tone}`}>{volBadge.label}</span>
+              </div>
+            </div>
+
+            <div className="hud-hero-value">
+              <span className="hud-total-amount">
+                {total && total.cumTurnover !== null ? formatTurnover(total.cumTurnover) : '暂不可用'}
+              </span>
+              <span
+                className={
+                  total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
+                    ? total.metrics.cumRatioPct > 0
+                      ? 'tone-up'
+                      : total.metrics.cumRatioPct < 0
+                        ? 'tone-down'
+                        : ''
+                    : ''
+                }
+                style={{ fontSize: '13px', fontWeight: 600 }}
+              >
+                {formatSignedPct(total?.metrics?.cumRatioPct, 1)}
+              </span>
+            </div>
+
+            <div className="hud-hero-sub">
+              <span>较昨同期 {formatSignedTurnover(total?.metrics?.cumDiff)}</span>
+              <span>预测全天 {formatTurnover(total?.metrics?.predictedFullDayTurnover)}</span>
             </div>
           </div>
 
-          <div className="hud-hero-value">
-            <span className="hud-total-amount">
-              {total && total.cumTurnover !== null ? formatTurnover(total.cumTurnover) : '暂不可用'}
-            </span>
-            <span
-              className={
-                total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
-                  ? total.metrics.cumRatioPct >= 0
+          {/* 四大核心指数精简卡片（点击直接打开该标的详情浮层） */}
+          <div className="hud-indices">
+            {(market?.indices ?? []).slice(0, 4).map((item) => {
+              const pct = resolveSymbolChangePct(item);
+              const turnover = resolveSymbolTurnover(item);
+              const toneClass =
+                pct === undefined || pct === null
+                  ? ''
+                  : pct > 0
                     ? 'tone-up'
-                    : 'tone-down'
-                  : ''
+                    : pct < 0
+                      ? 'tone-down'
+                      : '';
+              return (
+                <div
+                  key={item.symbol}
+                  className="hud-index-card"
+                  onClick={() => void window.api.openDetail({ symbol: item.symbol, tab: 'chart' })}
+                  title={`点击查看 ${item.name} 详情`}
+                >
+                  <div className="hud-index-row">
+                    <span style={{ fontWeight: 600 }}>{item.name}</span>
+                    {item.scope && <span className="scope-tag">{item.scope}</span>}
+                  </div>
+                  <div className="hud-index-row">
+                    <span className={toneClass}>{formatSignedPct(pct, 2)}</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {turnover !== null ? formatTurnover(turnover) : '降级'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 呼吸告警即时横幅 */}
+          {activeAlert && (
+            <div
+              className={`hud-alert-banner ${activeAlert.direction === 'SURGE' ? 'surge' : 'shrink'}`}
+              onClick={() =>
+                void window.api.openDetail({ symbol: activeAlert.symbol, tab: 'alerts' })
               }
-              style={{ fontSize: '13px', fontWeight: 600 }}
+              title="点击查看异动事件流"
             >
-              {formatSignedPct(total?.metrics?.cumRatioPct, 1)}
-            </span>
-          </div>
-
-          <div className="hud-hero-sub">
-            <span>较昨同期 {formatSignedTurnover(total?.metrics?.cumDiff)}</span>
-            <span>预测全天 {formatTurnover(total?.metrics?.predictedFullDayTurnover)}</span>
-          </div>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activeAlert.isSimulated ? '[模拟测试] ' : ''}
+                {activeAlert.name} · {activeAlert.direction === 'SURGE' ? '急放' : '急缩'} (
+                {formatSignedPct(activeAlert.slope, 2)}/分 · {activeAlert.windowMultiple.toFixed(2)}x)
+              </span>
+              {activeAlert.muted && <span className="badge badge-warn">静音</span>}
+            </div>
+          )}
         </div>
-
-        {/* 四大核心指数精简卡片（点击直接打开该标的详情浮层） */}
-        <div className="hud-indices no-drag">
-          {(market?.indices ?? []).slice(0, 4).map((item) => {
-            const pct = resolveSymbolChangePct(item);
-            const turnover = resolveSymbolTurnover(item);
-            const toneClass =
-              pct === undefined || pct === null ? '' : pct >= 0 ? 'tone-up' : 'tone-down';
-            return (
-              <div
-                key={item.symbol}
-                className="hud-index-card"
-                onClick={() => void window.api.openDetail({ symbol: item.symbol, tab: 'chart' })}
-                title={`点击查看 ${item.name} 详情`}
-              >
-                <div className="hud-index-row">
-                  <span style={{ fontWeight: 600 }}>{item.name}</span>
-                  {item.scope && <span className="scope-tag">{item.scope}</span>}
-                </div>
-                <div className="hud-index-row">
-                  <span className={toneClass}>{formatSignedPct(pct, 2)}</span>
-                  <span style={{ color: 'var(--text-secondary)' }}>
-                    {turnover !== null ? formatTurnover(turnover) : '降级'}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* 呼吸告警即时横幅 */}
-        {activeAlert && (
-          <div
-            className={`hud-alert-banner no-drag ${activeAlert.direction === 'SURGE' ? 'surge' : 'shrink'}`}
-            onClick={() =>
-              void window.api.openDetail({ symbol: activeAlert.symbol, tab: 'alerts' })
-            }
-            title="点击查看异动事件流"
-          >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {activeAlert.isSimulated ? '[模拟测试] ' : ''}
-              {activeAlert.name} · {activeAlert.direction === 'SURGE' ? '急放' : '急缩'} (
-              {formatSignedPct(activeAlert.slope, 2)}/分 · {activeAlert.windowMultiple.toFixed(2)}x)
-            </span>
-            {activeAlert.muted && <span className="badge badge-warn">静音</span>}
-          </div>
-        )}
 
         {/* 底部极简状态条 + 透明度滑块 + 开发态模拟测试入口 */}
         <footer className="hud-footer no-drag">

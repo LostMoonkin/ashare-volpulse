@@ -18,6 +18,7 @@ import type {
 import {
   clampHudOpacity,
   computeDetailOverlayBounds,
+  isRectSufficientlyVisible,
   resolveHudBounds,
   type Rect,
 } from './windowGeometry';
@@ -81,8 +82,8 @@ export interface WindowManagerOptions {
 
 /**
  * 双态桌面窗口管理器（紧凑 HUD 悬浮窗 + 详情浮层窗口）：
- * - HUD：无边框、透明圆角、置顶、不占任务栏、记忆坐标与 30%–100% 透明度
- * - Detail：贴近 HUD 弹出（空间不足则屏幕居中）、失焦不销毁、Esc 或点击收起隐藏
+ * - HUD：无边框、透明圆角、置顶、不占任务栏、后台不节流（保障隐藏态提示音）、记忆坐标与 30%–100% 透明度
+ * - Detail：贴近 HUD 弹出（空间不足则屏幕居中）、首次等待 ready-to-show 防闪屏、失焦不销毁、Esc 或点击收起隐藏
  * - 关闭按钮仅隐藏至托盘，只有明确 quit 时才允许真正销毁窗口
  */
 export class WindowManager {
@@ -94,6 +95,11 @@ export class WindowManager {
   private activeDetailSymbol = MARKET_TOTAL_SYMBOL;
   private activeDetailTab: DetailTab = 'chart';
   private detailFocusSeq = 0;
+  private hudReady = false;
+  private hudDesiredVisible = true;
+  private detailReady = false;
+  private detailDesiredVisible = false;
+  private suppressStateEvents = false;
   private isQuitting = false;
   private moveSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -129,6 +135,25 @@ export class WindowManager {
     return this.detailFocusSeq;
   }
 
+  private emitStateChanged(): void {
+    if (!this.suppressStateEvents) {
+      this.options.onStateChanged();
+    }
+  }
+
+  private withBatchedStateChange<T>(fn: () => T): T {
+    const prev = this.suppressStateEvents;
+    this.suppressStateEvents = true;
+    try {
+      return fn();
+    } finally {
+      this.suppressStateEvents = prev;
+      if (!prev) {
+        this.options.onStateChanged();
+      }
+    }
+  }
+
   private getDisplayMetrics(): { workAreas: Rect[]; primaryWorkArea: Rect } {
     const displays = screen.getAllDisplays();
     const primary = screen.getPrimaryDisplay();
@@ -136,6 +161,42 @@ export class WindowManager {
       workAreas: displays.map((d) => d.workArea),
       primaryWorkArea: primary.workArea,
     };
+  }
+
+  private ensureHudInVisibleWorkArea(win: BrowserWindow): void {
+    const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
+    const current = win.getBounds();
+    const safeBounds = resolveHudBounds(
+      { x: current.x, y: current.y },
+      { width: current.width || HUD_DEFAULT_WIDTH, height: current.height || HUD_DEFAULT_HEIGHT },
+      workAreas,
+      primaryWorkArea
+    );
+    if (safeBounds.x !== current.x || safeBounds.y !== current.y) {
+      win.setPosition(safeBounds.x, safeBounds.y);
+    }
+  }
+
+  private ensureDetailInVisibleWorkArea(win: BrowserWindow, preferRepositionNearHud: boolean): void {
+    const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
+    const current = win.getBounds();
+    const visible = isRectSufficientlyVisible(current, workAreas.length > 0 ? workAreas : [primaryWorkArea]);
+    if (!preferRepositionNearHud && visible) {
+      return;
+    }
+
+    const hudBounds =
+      this.hudWindow && !this.hudWindow.isDestroyed() ? this.hudWindow.getBounds() : null;
+    const nextBounds = computeDetailOverlayBounds(
+      hudBounds,
+      {
+        width: current.width || DETAIL_DEFAULT_WIDTH,
+        height: current.height || DETAIL_DEFAULT_HEIGHT,
+      },
+      workAreas,
+      primaryWorkArea
+    );
+    win.setBounds(nextBounds);
   }
 
   private loadView(win: BrowserWindow, view: 'hud' | 'detail'): void {
@@ -161,6 +222,9 @@ export class WindowManager {
       primaryWorkArea
     );
 
+    this.hudReady = false;
+    this.hudDesiredVisible = true;
+
     const win = new BrowserWindow({
       x: bounds.x,
       y: bounds.y,
@@ -185,6 +249,8 @@ export class WindowManager {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        // 保持隐藏至托盘期间 Web Audio 提示音不被 Chromium 后台节流挂起
+        backgroundThrottling: false,
       },
     });
 
@@ -195,12 +261,18 @@ export class WindowManager {
 
     win.once('ready-to-show', () => {
       if (win.isDestroyed()) return;
+      this.hudReady = true;
       win.setOpacity(clampHudOpacity(this.settings.hudOpacity));
       if (this.settings.alwaysOnTop) {
         win.setAlwaysOnTop(true, 'floating');
       }
-      win.show();
-      this.options.onStateChanged();
+
+      if (this.hudDesiredVisible) {
+        this.ensureHudInVisibleWorkArea(win);
+        this.withBatchedStateChange(() => {
+          win.show();
+        });
+      }
 
       if (!app.isPackaged) {
         const smokeExitMs = Number(process.env.A_SHARE_SMOKE_EXIT_MS || '0');
@@ -222,20 +294,23 @@ export class WindowManager {
       this.scheduleMoveSave();
     });
 
-    win.on('show', () => this.options.onStateChanged());
-    win.on('hide', () => this.options.onStateChanged());
+    win.on('show', () => this.emitStateChanged());
+    win.on('hide', () => this.emitStateChanged());
 
     win.on('close', (event) => {
       if (!this.isQuitting) {
         event.preventDefault();
-        win.hide();
-        this.options.onStateChanged();
+        this.hudDesiredVisible = false;
+        this.withBatchedStateChange(() => {
+          win.hide();
+        });
       }
     });
 
     win.on('closed', () => {
       if (this.hudWindow === win) {
         this.hudWindow = null;
+        this.hudReady = false;
       }
     });
 
@@ -258,6 +333,8 @@ export class WindowManager {
       workAreas,
       primaryWorkArea
     );
+
+    this.detailReady = false;
 
     const win = new BrowserWindow({
       x: bounds.x,
@@ -290,6 +367,21 @@ export class WindowManager {
       win.setAlwaysOnTop(true, 'floating');
     }
 
+    win.once('ready-to-show', () => {
+      if (win.isDestroyed()) return;
+      this.detailReady = true;
+      if (this.detailDesiredVisible) {
+        this.ensureDetailInVisibleWorkArea(win, true);
+        if (this.settings.alwaysOnTop) {
+          win.setAlwaysOnTop(true, 'floating');
+        }
+        this.withBatchedStateChange(() => {
+          win.show();
+          win.focus();
+        });
+      }
+    });
+
     // 失焦不销毁、不自动隐藏；仅按 Esc 或点击收起按钮隐藏
     win.webContents.on('before-input-event', (event, input) => {
       if (input.type === 'keyDown' && input.key === 'Escape') {
@@ -302,20 +394,23 @@ export class WindowManager {
       this.options.onWindowReady?.(win, 'detail');
     });
 
-    win.on('show', () => this.options.onStateChanged());
-    win.on('hide', () => this.options.onStateChanged());
+    win.on('show', () => this.emitStateChanged());
+    win.on('hide', () => this.emitStateChanged());
 
     win.on('close', (event) => {
       if (!this.isQuitting) {
         event.preventDefault();
-        win.hide();
-        this.options.onStateChanged();
+        this.detailDesiredVisible = false;
+        this.withBatchedStateChange(() => {
+          win.hide();
+        });
       }
     });
 
     win.on('closed', () => {
       if (this.detailWindow === win) {
         this.detailWindow = null;
+        this.detailReady = false;
       }
     });
 
@@ -326,31 +421,28 @@ export class WindowManager {
 
   showHud(): void {
     const win = this.createHudWindow();
+    this.hudDesiredVisible = true;
     this.bossVisibility.clearSnapshot();
-    const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
-    const current = win.getBounds();
-    const safeBounds = resolveHudBounds(
-      { x: current.x, y: current.y },
-      { width: current.width, height: current.height },
-      workAreas,
-      primaryWorkArea
-    );
-    if (safeBounds.x !== current.x || safeBounds.y !== current.y) {
-      win.setPosition(safeBounds.x, safeBounds.y);
-    }
+    this.ensureHudInVisibleWorkArea(win);
     if (this.settings.alwaysOnTop) {
       win.setAlwaysOnTop(true, 'floating');
     }
     win.setOpacity(clampHudOpacity(this.settings.hudOpacity));
-    win.show();
-    win.focus();
-    this.options.onStateChanged();
+
+    this.withBatchedStateChange(() => {
+      if (this.hudReady || win.isVisible()) {
+        win.show();
+        win.focus();
+      }
+    });
   }
 
   hideHud(): void {
+    this.hudDesiredVisible = false;
     if (this.hudWindow && !this.hudWindow.isDestroyed()) {
-      this.hudWindow.hide();
-      this.options.onStateChanged();
+      this.withBatchedStateChange(() => {
+        this.hudWindow?.hide();
+      });
     }
   }
 
@@ -373,39 +465,34 @@ export class WindowManager {
       this.detailFocusSeq += 1;
     }
 
+    this.detailDesiredVisible = true;
     const win = this.ensureDetailWindow();
     const wasVisible = win.isVisible();
     this.bossVisibility.clearSnapshot();
 
     if (!wasVisible) {
-      const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
-      const hudBounds =
-        this.hudWindow && !this.hudWindow.isDestroyed() ? this.hudWindow.getBounds() : null;
-      const currentSize = win.getBounds();
-      const nextBounds = computeDetailOverlayBounds(
-        hudBounds,
-        {
-          width: currentSize.width || DETAIL_DEFAULT_WIDTH,
-          height: currentSize.height || DETAIL_DEFAULT_HEIGHT,
-        },
-        workAreas,
-        primaryWorkArea
-      );
-      win.setBounds(nextBounds);
+      this.ensureDetailInVisibleWorkArea(win, true);
     }
 
     if (this.settings.alwaysOnTop) {
       win.setAlwaysOnTop(true, 'floating');
     }
-    win.show();
-    win.focus();
-    this.options.onStateChanged();
+
+    this.withBatchedStateChange(() => {
+      // 首次新建窗口等待 ready-to-show 避免透明窗闪黑/白帧；已就绪窗口立即显示并聚焦
+      if (this.detailReady || wasVisible) {
+        win.show();
+        win.focus();
+      }
+    });
   }
 
   hideDetail(): void {
+    this.detailDesiredVisible = false;
     if (this.detailWindow && !this.detailWindow.isDestroyed() && this.detailWindow.isVisible()) {
-      this.detailWindow.hide();
-      this.options.onStateChanged();
+      this.withBatchedStateChange(() => {
+        this.detailWindow?.hide();
+      });
     }
   }
 
@@ -417,40 +504,51 @@ export class WindowManager {
     }
   }
 
-  /** 老板键触发：隐藏所有窗口并记忆状态；再次触发时恢复到隐藏前状态 */
+  /** 老板键触发：隐藏所有窗口并记忆状态；再次触发时按可见性校验恢复到隐藏前状态 */
   toggleBossKeyVisibility(): { action: 'hide' | 'restore'; target: WindowVisibilitySnapshot } {
     const decision = this.bossVisibility.computeNextVisibility({
       hudVisible: this.isHudVisible(),
       detailVisible: this.isDetailVisible(),
     });
 
-    if (decision.action === 'hide') {
-      if (this.hudWindow && !this.hudWindow.isDestroyed()) {
-        this.hudWindow.hide();
-      }
-      if (this.detailWindow && !this.detailWindow.isDestroyed()) {
-        this.detailWindow.hide();
-      }
-    } else {
-      if (decision.target.hudVisible) {
-        const hud = this.createHudWindow();
-        if (this.settings.alwaysOnTop) {
-          hud.setAlwaysOnTop(true, 'floating');
+    this.withBatchedStateChange(() => {
+      if (decision.action === 'hide') {
+        this.hudDesiredVisible = false;
+        this.detailDesiredVisible = false;
+        if (this.hudWindow && !this.hudWindow.isDestroyed()) {
+          this.hudWindow.hide();
         }
-        hud.setOpacity(clampHudOpacity(this.settings.hudOpacity));
-        hud.show();
-      }
-      if (decision.target.detailVisible) {
-        const detail = this.ensureDetailWindow();
-        if (this.settings.alwaysOnTop) {
-          detail.setAlwaysOnTop(true, 'floating');
+        if (this.detailWindow && !this.detailWindow.isDestroyed()) {
+          this.detailWindow.hide();
         }
-        detail.show();
-        detail.focus();
+      } else {
+        if (decision.target.hudVisible) {
+          this.hudDesiredVisible = true;
+          const hud = this.createHudWindow();
+          this.ensureHudInVisibleWorkArea(hud);
+          if (this.settings.alwaysOnTop) {
+            hud.setAlwaysOnTop(true, 'floating');
+          }
+          hud.setOpacity(clampHudOpacity(this.settings.hudOpacity));
+          if (this.hudReady || hud.isVisible()) {
+            hud.show();
+          }
+        }
+        if (decision.target.detailVisible) {
+          this.detailDesiredVisible = true;
+          const detail = this.ensureDetailWindow();
+          this.ensureDetailInVisibleWorkArea(detail, false);
+          if (this.settings.alwaysOnTop) {
+            detail.setAlwaysOnTop(true, 'floating');
+          }
+          if (this.detailReady || detail.isVisible()) {
+            detail.show();
+            detail.focus();
+          }
+        }
       }
-    }
+    });
 
-    this.options.onStateChanged();
     return decision;
   }
 
@@ -523,6 +621,8 @@ export class WindowManager {
     }
     this.detailWindow = null;
     this.hudWindow = null;
+    this.hudReady = false;
+    this.detailReady = false;
   }
 }
 

@@ -90,13 +90,37 @@ export function DetailView() {
   }, []);
 
   const handleSaveBossKey = async () => {
-    const status = await window.api.setBossKey(bossKeyInput);
-    setBossKeyFeedback(status);
+    try {
+      const status = await window.api.setBossKey(bossKeyInput);
+      setBossKeyFeedback(status);
+    } catch (err: unknown) {
+      setBossKeyFeedback({
+        accelerator: bossKeyFeedback?.accelerator ?? '',
+        registered: bossKeyFeedback?.registered ?? false,
+        conflictMessage: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const handleKeepCurrentBossKey = async () => {
+    const active = bossKeyFeedback?.accelerator;
+    if (!active) return;
+    setBossKeyInput(active);
+    try {
+      const status = await window.api.setBossKey(active);
+      setBossKeyFeedback(status);
+    } catch {
+      // 忽略异常
+    }
   };
 
   const handleSimulate = async (direction: AlertDirection) => {
-    await window.api.simulateAlert(direction, selectedSymbol);
-    loadAlerts();
+    try {
+      await window.api.simulateAlert(direction, selectedSymbol);
+      loadAlerts();
+    } catch {
+      // 非开发模式或主进程异常时静默忽略
+    }
   };
 
   const selectedIndex =
@@ -193,6 +217,16 @@ export function DetailView() {
                     {idx.name} ({idx.scope ?? '指数'})
                   </button>
                 ))}
+                {(market?.watchlist ?? []).map((stock) => (
+                  <button
+                    key={stock.symbol}
+                    type="button"
+                    className={`pill-btn ${selectedSymbol === stock.symbol ? 'active' : ''}`}
+                    onClick={() => setSelectedSymbol(stock.symbol)}
+                  >
+                    {stock.name} ({stock.symbol})
+                  </button>
+                ))}
               </div>
 
               <section className="panel-card">
@@ -214,9 +248,11 @@ export function DetailView() {
                     <div
                       className={`metric-value ${
                         metrics?.cumRatioPct !== null && metrics?.cumRatioPct !== undefined
-                          ? metrics.cumRatioPct >= 0
+                          ? metrics.cumRatioPct > 0
                             ? 'tone-up'
-                            : 'tone-down'
+                            : metrics.cumRatioPct < 0
+                              ? 'tone-down'
+                              : ''
                           : ''
                       }`}
                     >
@@ -405,11 +441,16 @@ export function DetailView() {
                   <div>
                     <div>全局老板键（一键显隐所有窗口）</div>
                     <div className="setting-desc">
-                      当前状态：
+                      当前生效：
                       {bossKeyFeedback?.registered
                         ? `已生效 (${bossKeyFeedback.accelerator})`
-                        : bossKeyFeedback?.conflictMessage ?? '未注册'}
+                        : '未注册'}
                     </div>
+                    {bossKeyFeedback?.conflictMessage && (
+                      <div className="setting-desc tone-warn" role="alert">
+                        ⚠ {bossKeyFeedback.conflictMessage}
+                      </div>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                     <input
@@ -422,6 +463,16 @@ export function DetailView() {
                     <button type="button" className="btn" onClick={() => void handleSaveBossKey()}>
                       应用改绑
                     </button>
+                    {bossKeyFeedback?.registered && bossKeyFeedback.conflictMessage && (
+                      <button
+                        type="button"
+                        className="btn"
+                        title="清除冲突提示并恢复当前生效快捷键"
+                        onClick={() => void handleKeepCurrentBossKey()}
+                      >
+                        保留当前键
+                      </button>
+                    )}
                   </div>
                 </div>
 

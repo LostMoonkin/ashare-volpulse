@@ -76,11 +76,14 @@ export function formatPhaseLabel(phase: MarketPhaseType | undefined): string {
   }
 }
 
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+/** 严格按北京时间（Asia/Shanghai, UTC+8）格式化时钟，独立于宿主机时区 */
 export function formatClockTime(timestampMs: number | null | undefined): string {
   if (!timestampMs || !Number.isFinite(timestampMs)) return '—';
-  const d = new Date(timestampMs);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
+  const shifted = new Date(timestampMs + SHANGHAI_OFFSET_MS);
+  const hh = String(shifted.getUTCHours()).padStart(2, '0');
+  const mm = String(shifted.getUTCMinutes()).padStart(2, '0');
+  const ss = String(shifted.getUTCSeconds()).padStart(2, '0');
   return `${hh}:${mm}:${ss}`;
 }
