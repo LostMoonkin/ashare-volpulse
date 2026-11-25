@@ -2,8 +2,10 @@ export { ShellSettingsStore } from './shellSettingsStore';
 export {
   clampHudOpacity,
   computeDetailOverlayBounds,
+  computeResizedHudBounds,
   findTargetWorkArea,
   getDefaultHudPosition,
+  getHudSizeForMode,
   isRectSufficientlyVisible,
   resolveHudBounds,
   type Rect,

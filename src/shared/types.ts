@@ -272,6 +272,9 @@ export interface OpenDetailOptions {
   tab?: DetailTab;
 }
 
+/** 悬浮窗展示模式 */
+export type HudMode = 'standard' | 'minimal';
+
 /** 持久化在 app_settings 中的桌面外壳设置 */
 export interface DesktopShellSettings {
   hudPosition: WindowPosition | null;
@@ -280,6 +283,7 @@ export interface DesktopShellSettings {
   muted: boolean;
   bossKey: string;
   autoLaunch: boolean;
+  hudMode: HudMode;
 }
 
 /** 全局老板键注册状态 */

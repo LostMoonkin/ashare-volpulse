@@ -4,6 +4,7 @@ import type {
   AlertDirection,
   AlertDispatchPayload,
   DesktopShellState,
+  HudMode,
   MarketDashboardState,
   MonitorConfig,
   OpenDetailOptions,
@@ -51,6 +52,7 @@ const api: PreloadApi = {
     ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_BOSS_KEY, accelerator),
   setAutoLaunch: (enabled: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_AUTO_LAUNCH, enabled),
+  setHudMode: (mode: HudMode) => ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_HUD_MODE, mode),
   setDetailModalOpen: (open: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_DETAIL_MODAL_OPEN, open),
 

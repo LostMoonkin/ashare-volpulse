@@ -10,11 +10,19 @@ import {
   BossVisibilityController,
   clampHudOpacity,
   computeDetailOverlayBounds,
+  computeResizedHudBounds,
   getDefaultHudPosition,
+  getHudSizeForMode,
   isRectSufficientlyVisible,
   resolveHudBounds,
   type Rect,
 } from '../../src/main/windows';
+import {
+  HUD_DEFAULT_HEIGHT,
+  HUD_DEFAULT_WIDTH,
+  HUD_MINIMAL_HEIGHT,
+  HUD_MINIMAL_WIDTH,
+} from '../../src/shared/constants';
 
 const PRIMARY_WORK_AREA: Rect = { x: 0, y: 0, width: 1920, height: 1040 };
 const SECONDARY_WORK_AREA: Rect = { x: 1920, y: 0, width: 1920, height: 1040 };
@@ -112,6 +120,82 @@ describe('windowGeometry', () => {
     );
     expect(centeredDetail.x).toBe(Math.round((1024 - DETAIL_SIZE.width) / 2));
     expect(centeredDetail.y).toBe(Math.round((720 - DETAIL_SIZE.height) / 2));
+  });
+
+  it('resolves HUD sizes for standard/minimal modes and preserves edge anchors within workArea on resize', () => {
+    expect(getHudSizeForMode('standard')).toEqual({
+      width: HUD_DEFAULT_WIDTH,
+      height: HUD_DEFAULT_HEIGHT,
+    });
+    expect(getHudSizeForMode('minimal')).toEqual({
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+
+    // 右上角停靠：标准 -> 极简保持右边缘对齐；极简 -> 标准恢复原坐标
+    const standardRightTop: Rect = {
+      x: 1500,
+      y: 20,
+      width: HUD_DEFAULT_WIDTH,
+      height: HUD_DEFAULT_HEIGHT,
+    };
+    const minimalRightTop = computeResizedHudBounds(
+      standardRightTop,
+      getHudSizeForMode('minimal'),
+      [PRIMARY_WORK_AREA],
+      PRIMARY_WORK_AREA
+    );
+    expect(minimalRightTop).toEqual({
+      x: 1500 + HUD_DEFAULT_WIDTH - HUD_MINIMAL_WIDTH,
+      y: 20,
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+    expect(
+      computeResizedHudBounds(
+        minimalRightTop,
+        getHudSizeForMode('standard'),
+        [PRIMARY_WORK_AREA],
+        PRIMARY_WORK_AREA
+      )
+    ).toEqual(standardRightTop);
+
+    // 左半侧停靠：保持左边缘对齐
+    const standardLeftTop: Rect = {
+      x: 24,
+      y: 40,
+      width: HUD_DEFAULT_WIDTH,
+      height: HUD_DEFAULT_HEIGHT,
+    };
+    const minimalLeftTop = computeResizedHudBounds(
+      standardLeftTop,
+      getHudSizeForMode('minimal'),
+      [PRIMARY_WORK_AREA],
+      PRIMARY_WORK_AREA
+    );
+    expect(minimalLeftTop).toEqual({
+      x: 24,
+      y: 40,
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+
+    // 极简窗口贴近工作区底边后展开为标准模式：自动向上 clamp 不超出工作区
+    const minimalNearBottom: Rect = {
+      x: 1580,
+      y: 820,
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    };
+    const expanded = computeResizedHudBounds(
+      minimalNearBottom,
+      getHudSizeForMode('standard'),
+      [PRIMARY_WORK_AREA],
+      PRIMARY_WORK_AREA
+    );
+    expect(expanded.x).toBe(1580 + HUD_MINIMAL_WIDTH - HUD_DEFAULT_WIDTH);
+    expect(expanded.y).toBe(PRIMARY_WORK_AREA.height - HUD_DEFAULT_HEIGHT);
+    expect(expanded.y + expanded.height).toBeLessThanOrEqual(PRIMARY_WORK_AREA.height);
   });
 });
 

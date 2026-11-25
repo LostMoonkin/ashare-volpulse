@@ -228,6 +228,7 @@ describe('TrayManager', () => {
         muted: false,
         bossKey: 'Alt+Shift+A',
         autoLaunch: false,
+        hudMode: 'standard',
       },
       bossKeyStatus: {
         accelerator: 'Alt+Shift+A',
@@ -248,6 +249,7 @@ describe('TrayManager', () => {
     const actions = {
       onToggleHud: vi.fn(),
       onToggleDetail: vi.fn(),
+      onToggleMinimalMode: vi.fn(),
       onToggleAlwaysOnTop: vi.fn(),
       onToggleMuted: vi.fn(),
       onToggleAutoLaunch: vi.fn(),
@@ -266,6 +268,7 @@ describe('TrayManager', () => {
 
     expect(labels).toContain('隐藏悬浮窗');
     expect(labels).toContain('展开详情浮层');
+    expect(labels).toContain('极简模式');
     expect(labels).toContain('窗口置顶');
     expect(labels).toContain('静音提醒');
     expect(labels).toContain('开机自启');
@@ -284,6 +287,11 @@ describe('TrayManager', () => {
     (muteItem?.click as (arg: { checked: boolean }) => void)?.({ checked: true });
     expect(actions.onToggleMuted).toHaveBeenCalledWith(true);
 
+    const minimalItem = devMenu.find((i) => i.label === '极简模式');
+    expect(minimalItem?.checked).toBe(false);
+    (minimalItem?.click as (arg: { checked: boolean }) => void)?.({ checked: true });
+    expect(actions.onToggleMinimalMode).toHaveBeenCalledWith(true);
+
     const simSurge = devMenu.find((i) => i.label === '开发测试：模拟急放告警');
     (simSurge?.click as () => void)?.();
     expect(actions.onSimulateAlert).toHaveBeenCalledWith('SURGE');
@@ -292,12 +300,28 @@ describe('TrayManager', () => {
     (quitItem?.click as () => void)?.();
     expect(actions.onQuit).toHaveBeenCalledTimes(1);
 
-    // 切换生产态（isDev: false）时绝不暴露模拟菜单项
-    trayMgr.updateShellState(makeShellState({ isDev: false, hudVisible: false, detailVisible: true }));
+    // 切换生产态（isDev: false）时绝不暴露模拟菜单项，且极简勾选同步
+    trayMgr.updateShellState(
+      makeShellState({
+        isDev: false,
+        hudVisible: false,
+        detailVisible: true,
+        settings: {
+          hudPosition: null,
+          hudOpacity: 0.9,
+          alwaysOnTop: true,
+          muted: false,
+          bossKey: 'Alt+Shift+A',
+          autoLaunch: false,
+          hudMode: 'minimal',
+        },
+      })
+    );
     const prodMenu = mockBuiltMenuTemplates[mockBuiltMenuTemplates.length - 1];
     const prodLabels = prodMenu.map((item) => item.label).filter(Boolean);
     expect(prodLabels).toContain('显示悬浮窗');
     expect(prodLabels).toContain('收起详情浮层');
+    expect(prodMenu.find((i) => i.label === '极简模式')?.checked).toBe(true);
     expect(prodLabels).not.toContain('开发测试：模拟急放告警');
 
     // 行情状态由放量切为降级时更新图标与 Tooltip
@@ -308,6 +332,30 @@ describe('TrayManager', () => {
 
     trayMgr.destroy();
     expect(trayInstance.destroyed).toBe(true);
+  });
+
+  it('does not bind click-to-toggle on macOS so menu bar click only opens context menu', () => {
+    const actions = {
+      onToggleHud: vi.fn(),
+      onToggleDetail: vi.fn(),
+      onToggleMinimalMode: vi.fn(),
+      onToggleAlwaysOnTop: vi.fn(),
+      onToggleMuted: vi.fn(),
+      onToggleAutoLaunch: vi.fn(),
+      onRefreshNow: vi.fn(),
+      onOpenSettings: vi.fn(),
+      onQuit: vi.fn(),
+    };
+
+    const macTrayMgr = new TrayManager(actions, 'darwin');
+    macTrayMgr.init(makeShellState({ isDev: false }), makeDashboardState({ volumeState: 'FLAT' }));
+
+    const macTrayInstance = mockTrayInstances[mockTrayInstances.length - 1];
+    expect(macTrayInstance.listeners.has('click')).toBe(false);
+    expect(actions.onToggleHud).not.toHaveBeenCalled();
+
+    macTrayMgr.destroy();
+    expect(macTrayInstance.destroyed).toBe(true);
   });
 });
 

@@ -1,9 +1,13 @@
 import {
   DEFAULT_HUD_OPACITY,
+  HUD_DEFAULT_HEIGHT,
+  HUD_DEFAULT_WIDTH,
+  HUD_MINIMAL_HEIGHT,
+  HUD_MINIMAL_WIDTH,
   MAX_HUD_OPACITY,
   MIN_HUD_OPACITY,
 } from '../../shared/constants';
-import type { WindowPosition } from '../../shared/types';
+import type { HudMode, WindowPosition } from '../../shared/types';
 
 export interface Rect {
   x: number;
@@ -15,6 +19,13 @@ export interface Rect {
 export interface Size {
   width: number;
   height: number;
+}
+
+/** 按展示模式返回 HUD 窗口目标尺寸 */
+export function getHudSizeForMode(mode: HudMode): Size {
+  return mode === 'minimal'
+    ? { width: HUD_MINIMAL_WIDTH, height: HUD_MINIMAL_HEIGHT }
+    : { width: HUD_DEFAULT_WIDTH, height: HUD_DEFAULT_HEIGHT };
 }
 
 /** 将 HUD 透明度钳制在 [0.3, 1.0]，非法值回退默认值 */
@@ -244,5 +255,38 @@ export function computeDetailOverlayBounds(
     y: Math.round(wa.y + Math.max(0, (wa.height - height) / 2)),
     width,
     height,
+  };
+}
+
+/**
+ * 计算 HUD 在标准/极简模式间切换后的目标边界：
+ * - 位于当前工作区右半侧时保持右边缘对齐，位于左半侧时保持左边缘对齐
+ * - 若缩放后超出工作区边界，则 clamp 回当前显示器工作区可见范围内
+ */
+export function computeResizedHudBounds(
+  currentBounds: Rect,
+  nextSize: Size,
+  workAreas: readonly Rect[],
+  primaryWorkArea: Rect
+): Rect {
+  const areas = workAreas.length > 0 ? workAreas : [primaryWorkArea];
+  const wa = findTargetWorkArea(currentBounds, areas, primaryWorkArea);
+  const centerX = currentBounds.x + currentBounds.width / 2;
+  const waMidX = wa.x + wa.width / 2;
+
+  const rawX =
+    centerX >= waMidX
+      ? currentBounds.x + currentBounds.width - nextSize.width
+      : currentBounds.x;
+  const rawY = currentBounds.y;
+
+  const maxX = wa.x + Math.max(0, wa.width - nextSize.width);
+  const maxY = wa.y + Math.max(0, wa.height - nextSize.height);
+
+  return {
+    x: Math.round(clamp(rawX, wa.x, maxX)),
+    y: Math.round(clamp(rawY, wa.y, maxY)),
+    width: nextSize.width,
+    height: nextSize.height,
   };
 }

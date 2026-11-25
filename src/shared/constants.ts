@@ -100,6 +100,7 @@ export const SETTING_ALWAYS_ON_TOP = 'shell.alwaysOnTop';
 export const SETTING_MUTED = 'shell.muted';
 export const SETTING_BOSS_KEY = 'shell.bossKey';
 export const SETTING_AUTO_LAUNCH = 'shell.autoLaunch';
+export const SETTING_HUD_MODE = 'shell.hudMode';
 export const SETTING_MONITOR_CONFIG = 'monitor.config';
 
 /** 可选滚动斜率窗口（分钟） */
@@ -110,10 +111,14 @@ export const DEFAULT_HUD_OPACITY = 0.9;
 export const MIN_HUD_OPACITY = 0.3;
 export const MAX_HUD_OPACITY = 1.0;
 export const DEFAULT_BOSS_KEY = 'Alt+Shift+A';
+export const DEFAULT_HUD_MODE = 'standard' as const;
+export const HUD_MINIMAL_WATCHLIST_LIMIT = 3;
 
 /** 双态窗口默认尺寸（像素） */
 export const HUD_DEFAULT_WIDTH = 400;
 export const HUD_DEFAULT_HEIGHT = 456;
+export const HUD_MINIMAL_WIDTH = 320;
+export const HUD_MINIMAL_HEIGHT = 212;
 export const DETAIL_DEFAULT_WIDTH = 960;
 export const DETAIL_DEFAULT_HEIGHT = 640;
 export const DETAIL_MIN_WIDTH = 780;

@@ -562,6 +562,103 @@ body,
   cursor: pointer;
 }
 
+/* 极简模式 HUD */
+.hud-shell-minimal {
+  position: relative;
+  gap: 5px;
+  padding: 7px 9px;
+}
+
+.hud-header-minimal {
+  gap: 4px;
+}
+
+.hud-brand-minimal {
+  font-size: 11px;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.icon-btn-minimal {
+  height: 18px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+.hud-conflict-banner-minimal {
+  padding: 3px 6px;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-hero-minimal {
+  padding: 6px 8px;
+}
+
+.hud-hero-value-minimal {
+  margin-top: 2px;
+  align-items: center;
+}
+
+.hud-total-amount-minimal {
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.hud-minimal-ratio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-minimal-stocks {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 3px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.hud-quote-row-minimal {
+  grid-template-columns: minmax(0, 1fr) 48px 52px 56px 38px;
+  gap: 3px;
+  padding: 3px 4px;
+  font-size: 11px;
+}
+
+.hud-watchlist-empty-minimal {
+  padding: 8px 6px;
+}
+
+.hud-alert-banner-minimal {
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  bottom: 7px;
+  z-index: 10;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+.hud-alert-banner-minimal.surge {
+  background: rgba(42, 18, 22, 0.94);
+}
+
+.hud-alert-banner-minimal.shrink {
+  background: rgba(16, 36, 24, 0.94);
+}
+
 /* ---------------- 详情浮层窗口 ---------------- */
 .detail-viewport {
   width: 100%;

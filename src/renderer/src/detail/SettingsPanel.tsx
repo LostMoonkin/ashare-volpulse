@@ -542,6 +542,31 @@ export function SettingsPanel({
         <div className="settings-grid">
           <div className="setting-row">
             <div>
+              <div>悬浮窗展示模式</div>
+              <div className="setting-desc">
+                极简模式仅展示沪深总成交与前 3 条自选股，并隐藏大部分控制按钮
+              </div>
+            </div>
+            <div className="segmented-group">
+              <button
+                type="button"
+                className={`seg-btn ${(shell?.settings.hudMode ?? 'standard') === 'standard' ? 'active' : ''}`}
+                onClick={() => void window.api.setHudMode('standard')}
+              >
+                标准模式
+              </button>
+              <button
+                type="button"
+                className={`seg-btn ${shell?.settings.hudMode === 'minimal' ? 'active' : ''}`}
+                onClick={() => void window.api.setHudMode('minimal')}
+              >
+                极简模式
+              </button>
+            </div>
+          </div>
+
+          <div className="setting-row">
+            <div>
               <div>HUD 窗口透明度（{opacityPct}%）</div>
               <div className="setting-desc">支持 30%–100%，重启后自动恢复</div>
             </div>

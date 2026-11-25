@@ -6,6 +6,7 @@ import { formatTrayTooltip } from './trayTooltip';
 export interface TrayManagerActions {
   onToggleHud: () => void;
   onToggleDetail: () => void;
+  onToggleMinimalMode: (next: boolean) => void;
   onToggleAlwaysOnTop: (next: boolean) => void;
   onToggleMuted: (next: boolean) => void;
   onToggleAutoLaunch: (next: boolean) => void;
@@ -22,12 +23,14 @@ export interface TrayManagerActions {
  */
 export class TrayManager {
   private readonly actions: TrayManagerActions;
+  private readonly platform: NodeJS.Platform;
   private tray: Tray | null = null;
   private currentMood: TrayIconMood = 'flat';
   private lastShellState: DesktopShellState | null = null;
 
-  constructor(actions: TrayManagerActions) {
+  constructor(actions: TrayManagerActions, platform: NodeJS.Platform = process.platform) {
     this.actions = actions;
+    this.platform = platform;
   }
 
   init(initialShellState: DesktopShellState, initialMarketState: MarketDashboardState | null): void {
@@ -40,9 +43,12 @@ export class TrayManager {
     this.tray.setToolTip(formatTrayTooltip(initialMarketState));
     this.rebuildContextMenu();
 
-    this.tray.on('click', () => {
-      this.actions.onToggleHud();
-    });
+    // macOS 菜单栏图标绑定 contextMenu 后左键默认展开菜单，避免叠加 click 导致同时显隐 HUD
+    if (this.platform !== 'darwin') {
+      this.tray.on('click', () => {
+        this.actions.onToggleHud();
+      });
+    }
   }
 
   updateMarketState(state: MarketDashboardState | null): void {
@@ -76,6 +82,12 @@ export class TrayManager {
         click: () => this.actions.onToggleDetail(),
       },
       { type: 'separator' },
+      {
+        label: '极简模式',
+        type: 'checkbox',
+        checked: shell.settings.hudMode === 'minimal',
+        click: (menuItem) => this.actions.onToggleMinimalMode(menuItem.checked),
+      },
       {
         label: '窗口置顶',
         type: 'checkbox',

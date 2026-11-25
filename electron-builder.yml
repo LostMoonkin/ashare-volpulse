@@ -14,4 +14,19 @@ win:
       arch:
         - x64
 portable:
-  artifactName: ${productName}-${version}-portable.${ext}
+  artifactName: a-share-monitor-${version}-win-${arch}-portable.${ext}
+mac:
+  category: public.app-category.finance
+  identity: null
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  artifactName: a-share-monitor-${version}-mac-${arch}.${ext}
+dmg:
+  artifactName: a-share-monitor-${version}-mac-${arch}.${ext}

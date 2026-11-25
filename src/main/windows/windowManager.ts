@@ -5,19 +5,20 @@ import {
   DETAIL_DEFAULT_WIDTH,
   DETAIL_MIN_HEIGHT,
   DETAIL_MIN_WIDTH,
-  HUD_DEFAULT_HEIGHT,
-  HUD_DEFAULT_WIDTH,
   MARKET_TOTAL_SYMBOL,
 } from '../../shared/constants';
 import type {
   DesktopShellSettings,
   DetailTab,
+  HudMode,
   OpenDetailOptions,
   WindowPosition,
 } from '../../shared/types';
 import {
   clampHudOpacity,
   computeDetailOverlayBounds,
+  computeResizedHudBounds,
+  getHudSizeForMode,
   isRectSufficientlyVisible,
   resolveHudBounds,
   type Rect,
@@ -155,6 +156,21 @@ export class WindowManager {
     }
   }
 
+  private applyWindowPinning(win: BrowserWindow, alwaysOnTop: boolean): void {
+    if (alwaysOnTop) {
+      win.setAlwaysOnTop(true, 'floating');
+      // macOS 下开启跨桌面与全屏应用上方可见，保证全屏看盘/写代码时 HUD 仍可悬浮
+      if (process.platform === 'darwin' && typeof win.setVisibleOnAllWorkspaces === 'function') {
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      }
+    } else {
+      win.setAlwaysOnTop(false);
+      if (process.platform === 'darwin' && typeof win.setVisibleOnAllWorkspaces === 'function') {
+        win.setVisibleOnAllWorkspaces(false);
+      }
+    }
+  }
+
   private getDisplayMetrics(): { workAreas: Rect[]; primaryWorkArea: Rect } {
     const displays = screen.getAllDisplays();
     const primary = screen.getPrimaryDisplay();
@@ -167,9 +183,10 @@ export class WindowManager {
   private ensureHudInVisibleWorkArea(win: BrowserWindow): void {
     const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
     const current = win.getBounds();
+    const modeSize = getHudSizeForMode(this.settings.hudMode);
     const safeBounds = resolveHudBounds(
       { x: current.x, y: current.y },
-      { width: current.width || HUD_DEFAULT_WIDTH, height: current.height || HUD_DEFAULT_HEIGHT },
+      { width: current.width || modeSize.width, height: current.height || modeSize.height },
       workAreas,
       primaryWorkArea
     );
@@ -216,9 +233,10 @@ export class WindowManager {
     }
 
     const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
+    const hudSize = getHudSizeForMode(this.settings.hudMode);
     const bounds = resolveHudBounds(
       this.settings.hudPosition,
-      { width: HUD_DEFAULT_WIDTH, height: HUD_DEFAULT_HEIGHT },
+      hudSize,
       workAreas,
       primaryWorkArea
     );
@@ -231,8 +249,8 @@ export class WindowManager {
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
-      minWidth: HUD_DEFAULT_WIDTH,
-      minHeight: HUD_DEFAULT_HEIGHT,
+      minWidth: bounds.width,
+      minHeight: bounds.height,
       frame: false,
       transparent: true,
       backgroundColor: '#00000000',
@@ -256,17 +274,13 @@ export class WindowManager {
     });
 
     win.setOpacity(clampHudOpacity(this.settings.hudOpacity));
-    if (this.settings.alwaysOnTop) {
-      win.setAlwaysOnTop(true, 'floating');
-    }
+    this.applyWindowPinning(win, this.settings.alwaysOnTop);
 
     win.once('ready-to-show', () => {
       if (win.isDestroyed()) return;
       this.hudReady = true;
       win.setOpacity(clampHudOpacity(this.settings.hudOpacity));
-      if (this.settings.alwaysOnTop) {
-        win.setAlwaysOnTop(true, 'floating');
-      }
+      this.applyWindowPinning(win, this.settings.alwaysOnTop);
 
       if (this.hudDesiredVisible) {
         this.ensureHudInVisibleWorkArea(win);
@@ -364,18 +378,14 @@ export class WindowManager {
       },
     });
 
-    if (this.settings.alwaysOnTop) {
-      win.setAlwaysOnTop(true, 'floating');
-    }
+    this.applyWindowPinning(win, this.settings.alwaysOnTop);
 
     win.once('ready-to-show', () => {
       if (win.isDestroyed()) return;
       this.detailReady = true;
       if (this.detailDesiredVisible) {
         this.ensureDetailInVisibleWorkArea(win, true);
-        if (this.settings.alwaysOnTop) {
-          win.setAlwaysOnTop(true, 'floating');
-        }
+        this.applyWindowPinning(win, this.settings.alwaysOnTop);
         this.withBatchedStateChange(() => {
           win.show();
           win.focus();
@@ -573,13 +583,42 @@ export class WindowManager {
 
     for (const win of [this.hudWindow, this.detailWindow]) {
       if (win && !win.isDestroyed()) {
-        if (normalized) {
-          win.setAlwaysOnTop(true, 'floating');
-        } else {
-          win.setAlwaysOnTop(false);
-        }
+        this.applyWindowPinning(win, normalized);
       }
     }
+    return normalized;
+  }
+
+  /** 切换 HUD 标准/极简模式并按锚点同步缩放窗体物理尺寸 */
+  applyHudMode(mode: HudMode): HudMode {
+    const normalized: HudMode = mode === 'minimal' ? 'minimal' : 'standard';
+    this.settings = { ...this.settings, hudMode: normalized };
+
+    if (this.hudWindow && !this.hudWindow.isDestroyed()) {
+      const win = this.hudWindow;
+      const current = win.getBounds();
+      const nextSize = getHudSizeForMode(normalized);
+      const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
+      const nextBounds = computeResizedHudBounds(current, nextSize, workAreas, primaryWorkArea);
+
+      if (this.moveSaveTimer) {
+        clearTimeout(this.moveSaveTimer);
+        this.moveSaveTimer = null;
+      }
+
+      // Windows 下 resizable: false 窗口需临时放开 resizable 并更新 minSize 才能可靠缩小
+      win.setResizable(true);
+      win.setMinimumSize(nextBounds.width, nextBounds.height);
+      win.setBounds(nextBounds);
+      win.setResizable(false);
+
+      if (nextBounds.x !== current.x || nextBounds.y !== current.y) {
+        const pos: WindowPosition = { x: nextBounds.x, y: nextBounds.y };
+        this.settings = { ...this.settings, hudPosition: pos };
+        this.options.onHudPositionCommitted(pos);
+      }
+    }
+
     return normalized;
   }
 

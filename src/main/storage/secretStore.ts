@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { HITHINK_API_KEY_ENV } from '../../shared/constants';
 import type { SecretSource, SecretStatus } from '../../shared/types';
@@ -17,8 +18,42 @@ export interface SecretStoreOptions {
   safeStorage?: SafeStorageAdapter;
   /** 环境变量源，默认 process.env */
   env?: NodeJS.ProcessEnv;
-  /** 用户级 credentials.env 路径，默认 %APPDATA%\hithink-finance\credentials.env */
+  /** 目标操作系统，默认 process.platform（便于跨平台单测） */
+  platform?: NodeJS.Platform;
+  /** 用户主目录，默认 os.homedir()（便于跨平台单测） */
+  homeDir?: string;
+  /** 用户级 credentials.env 路径，默认按平台自动解析 */
   credentialsEnvPath?: string;
+}
+
+/**
+ * 按平台解析同花顺统一用户级 credentials.env 默认路径：
+ * - Windows: %APPDATA%\hithink-finance\credentials.env
+ * - macOS:   ~/Library/Application Support/hithink-finance/credentials.env
+ * - Linux:   ${XDG_CONFIG_HOME:-~/.config}/hithink-finance/credentials.env
+ */
+export function resolveDefaultCredentialsEnvPath(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  homeDir?: string
+): string {
+  if (platform === 'win32') {
+    const appData = env.APPDATA?.trim();
+    return appData ? path.join(appData, 'hithink-finance', 'credentials.env') : '';
+  }
+
+  const resolvedHome = (homeDir ?? env.HOME ?? os.homedir()).trim();
+  if (platform === 'darwin') {
+    return resolvedHome
+      ? path.join(resolvedHome, 'Library', 'Application Support', 'hithink-finance', 'credentials.env')
+      : '';
+  }
+
+  const xdgConfig = env.XDG_CONFIG_HOME?.trim();
+  if (xdgConfig) {
+    return path.join(xdgConfig, 'hithink-finance', 'credentials.env');
+  }
+  return resolvedHome ? path.join(resolvedHome, '.config', 'hithink-finance', 'credentials.env') : '';
 }
 
 interface ResolvedSecret {
@@ -82,10 +117,10 @@ export class SecretStore {
     this.encryptedFilePath = options.encryptedFilePath;
     this.safeStorage = options.safeStorage;
     this.env = options.env ?? process.env;
-    const appData = this.env.APPDATA?.trim();
+    const platform = options.platform ?? process.platform;
     this.credentialsEnvPath =
       options.credentialsEnvPath ??
-      (appData ? path.join(appData, 'hithink-finance', 'credentials.env') : '');
+      resolveDefaultCredentialsEnvPath(platform, this.env, options.homeDir);
   }
 
   private isEncryptionAvailable(): boolean {

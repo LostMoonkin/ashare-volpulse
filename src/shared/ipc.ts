@@ -6,6 +6,7 @@ import type {
   BossKeyStatus,
   DatabaseRetentionStats,
   DesktopShellState,
+  HudMode,
   MarketDashboardState,
   MonitorConfig,
   OpenDetailOptions,
@@ -50,6 +51,7 @@ export const IPC_CHANNELS = {
   SHELL_SET_MUTED: 'shell:set-muted',
   SHELL_SET_BOSS_KEY: 'shell:set-boss-key',
   SHELL_SET_AUTO_LAUNCH: 'shell:set-auto-launch',
+  SHELL_SET_HUD_MODE: 'shell:set-hud-mode',
   SHELL_SET_DETAIL_MODAL_OPEN: 'shell:set-detail-modal-open',
 } as const;
 
@@ -80,6 +82,7 @@ export interface PreloadApi {
   setMuted(muted: boolean): Promise<DesktopShellState>;
   setBossKey(accelerator: string): Promise<BossKeyStatus>;
   setAutoLaunch(enabled: boolean): Promise<DesktopShellState>;
+  setHudMode(mode: HudMode): Promise<DesktopShellState>;
   setDetailModalOpen(open: boolean): Promise<void>;
   getRecentAlerts(tradeDate?: string, limit?: number): Promise<AlertEventRow[]>;
   simulateAlert(direction: AlertDirection, symbol?: string): Promise<AlertDispatchPayload>;

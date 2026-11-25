@@ -11,3 +11,9 @@
 | 4 | [Electron 桌面外壳与告警通道](phase-4-desktop-shell.md) | 3 |
 | 5 | [HUD 与详情看板界面](phase-5-dashboard-ui.md) | 4 |
 | 6 | [全天回放验证与 Windows 便携版打包](phase-6-replay-packaging.md) | 5 |
+
+## Feature Specs
+
+| 功能 | Spec | 状态 |
+| --- | --- | --- |
+| 桌面悬浮窗极简模式 | [桌面悬浮窗极简模式](hud-minimal-mode.md) | 已确认 |

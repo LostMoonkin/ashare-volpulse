@@ -1,16 +1,22 @@
 import {
   DEFAULT_BOSS_KEY,
+  DEFAULT_HUD_MODE,
   DEFAULT_HUD_OPACITY,
   SETTING_ALWAYS_ON_TOP,
   SETTING_AUTO_LAUNCH,
   SETTING_BOSS_KEY,
+  SETTING_HUD_MODE,
   SETTING_HUD_OPACITY,
   SETTING_HUD_POSITION,
   SETTING_MUTED,
 } from '../../shared/constants';
-import type { DesktopShellSettings, WindowPosition } from '../../shared/types';
+import type { DesktopShellSettings, HudMode, WindowPosition } from '../../shared/types';
 import type { AppDatabase } from '../storage/database';
 import { clampHudOpacity } from './windowGeometry';
+
+function parseHudMode(raw: unknown): HudMode {
+  return raw === 'minimal' ? 'minimal' : DEFAULT_HUD_MODE;
+}
 
 function parseWindowPosition(raw: unknown): WindowPosition | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -41,6 +47,7 @@ export class ShellSettingsStore {
     const rawMuted = this.db.getSetting<unknown>(SETTING_MUTED);
     const rawBossKey = this.db.getSetting<unknown>(SETTING_BOSS_KEY);
     const rawAutoLaunch = this.db.getSetting<unknown>(SETTING_AUTO_LAUNCH);
+    const rawHudMode = this.db.getSetting<unknown>(SETTING_HUD_MODE);
 
     return {
       hudPosition: parseWindowPosition(rawPosition),
@@ -53,6 +60,7 @@ export class ShellSettingsStore {
           ? rawBossKey.trim()
           : DEFAULT_BOSS_KEY,
       autoLaunch: typeof rawAutoLaunch === 'boolean' ? rawAutoLaunch : false,
+      hudMode: parseHudMode(rawHudMode),
     };
   }
 
@@ -92,6 +100,12 @@ export class ShellSettingsStore {
   setAutoLaunch(enabled: boolean): boolean {
     const normalized = Boolean(enabled);
     this.db.setSetting(SETTING_AUTO_LAUNCH, normalized);
+    return normalized;
+  }
+
+  setHudMode(mode: HudMode): HudMode {
+    const normalized = parseHudMode(mode);
+    this.db.setSetting(SETTING_HUD_MODE, normalized);
     return normalized;
   }
 }

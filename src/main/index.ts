@@ -15,6 +15,7 @@ import type {
   BootstrapState,
   DesktopShellSettings,
   DesktopShellState,
+  HudMode,
   MarketDashboardState,
   MonitorConfig,
   OpenDetailOptions,
@@ -220,6 +221,16 @@ function updateAutoLaunch(enabled: boolean): DesktopShellState {
     const normalized = settingsStore.setAutoLaunch(enabled);
     shellSettings = { ...shellSettings, autoLaunch: normalized };
   }
+  return syncShellState();
+}
+
+function updateHudMode(mode: HudMode): DesktopShellState {
+  if (!settingsStore || !shellSettings || !windowManager) {
+    throw new Error('Desktop shell is not ready.');
+  }
+  const normalized = settingsStore.setHudMode(mode);
+  shellSettings = { ...shellSettings, hudMode: normalized };
+  windowManager.applyHudMode(normalized);
   return syncShellState();
 }
 
@@ -434,6 +445,13 @@ function registerIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(
+    IPC_CHANNELS.SHELL_SET_HUD_MODE,
+    (_event, mode: HudMode): DesktopShellState => {
+      return updateHudMode(mode);
+    }
+  );
+
   ipcMain.handle(IPC_CHANNELS.SHELL_SET_DETAIL_MODAL_OPEN, (_event, open: boolean): void => {
     windowManager?.setDetailEscapeSuppressed(Boolean(open));
   });
@@ -553,6 +571,9 @@ function initServices(): void {
   trayManager = new TrayManager({
     onToggleHud: () => windowManager?.toggleHud(),
     onToggleDetail: () => windowManager?.toggleDetail(),
+    onToggleMinimalMode: (next) => {
+      updateHudMode(next ? 'minimal' : 'standard');
+    },
     onToggleAlwaysOnTop: (next) => {
       updateAlwaysOnTop(next);
     },
@@ -655,6 +676,10 @@ if (replayCliParseError) {
   app
     .whenReady()
     .then(() => {
+      // macOS 作为菜单栏 + 悬浮窗驻留工具运行，不占用 Dock 图标
+      if (process.platform === 'darwin') {
+        app.dock?.hide();
+      }
       initServices();
       registerIpcHandlers();
 

@@ -28,10 +28,11 @@ describe('ShellSettingsStore', () => {
       muted: false,
       bossKey: 'Alt+Shift+A',
       autoLaunch: false,
+      hudMode: 'standard',
     });
   });
 
-  it('persists HUD position, clamped opacity, alwaysOnTop, muted, bossKey, and autoLaunch', () => {
+  it('persists HUD position, clamped opacity, alwaysOnTop, muted, bossKey, autoLaunch, and hudMode', () => {
     const db = createMemoryDb();
     const store = new ShellSettingsStore(db);
 
@@ -41,6 +42,7 @@ describe('ShellSettingsStore', () => {
     expect(store.setMuted(true)).toBe(true);
     expect(store.setBossKey('  Ctrl+Shift+M  ')).toBe('Ctrl+Shift+M');
     expect(store.setAutoLaunch(true)).toBe(true);
+    expect(store.setHudMode('minimal')).toBe('minimal');
 
     // 模拟重启后从同一 SQLite 重新读取
     const reloaded = new ShellSettingsStore(db).load();
@@ -51,6 +53,11 @@ describe('ShellSettingsStore', () => {
       muted: true,
       bossKey: 'Ctrl+Shift+M',
       autoLaunch: true,
+      hudMode: 'minimal',
     });
+
+    // 非法值和切回标准模式均正常落盘并回退默认值
+    expect(store.setHudMode('unknown' as unknown as 'standard')).toBe('standard');
+    expect(new ShellSettingsStore(db).load().hudMode).toBe('standard');
   });
 });

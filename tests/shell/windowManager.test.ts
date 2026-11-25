@@ -10,6 +10,10 @@ interface MockBounds {
 interface MockBrowserWindowInstance {
   opts: Record<string, unknown>;
   bounds: MockBounds;
+  minWidth: number;
+  minHeight: number;
+  resizable: boolean;
+  resizeSequence: string[];
   visible: boolean;
   destroyed: boolean;
   opacity: number;
@@ -68,6 +72,10 @@ vi.mock('electron', () => ({
         width: Number(opts.width ?? 376),
         height: Number(opts.height ?? 388),
       },
+      minWidth: Number(opts.minWidth ?? 0),
+      minHeight: Number(opts.minHeight ?? 0),
+      resizable: opts.resizable !== false,
+      resizeSequence: [],
       visible: Boolean(opts.show),
       destroyed: false,
       opacity: 1,
@@ -109,8 +117,18 @@ vi.mock('electron', () => ({
         instance.alwaysOnTop = flag;
       }),
       getBounds: () => ({ ...instance.bounds }),
+      setResizable: vi.fn((flag: boolean) => {
+        instance.resizable = flag;
+        instance.resizeSequence.push(`resizable:${flag}`);
+      }),
+      setMinimumSize: vi.fn((width: number, height: number) => {
+        instance.minWidth = width;
+        instance.minHeight = height;
+        instance.resizeSequence.push(`minSize:${width}x${height}`);
+      }),
       setBounds: vi.fn((b: MockBounds) => {
         instance.bounds = { ...b };
+        instance.resizeSequence.push(`bounds:${b.width}x${b.height}`);
       }),
       getPosition: () => [instance.bounds.x, instance.bounds.y] as [number, number],
       setPosition: vi.fn((x: number, y: number) => {
@@ -145,7 +163,12 @@ vi.mock('electron', () => ({
 }));
 
 import { WindowManager } from '../../src/main/windows/windowManager';
-import { HUD_DEFAULT_HEIGHT } from '../../src/shared/constants';
+import {
+  HUD_DEFAULT_HEIGHT,
+  HUD_DEFAULT_WIDTH,
+  HUD_MINIMAL_HEIGHT,
+  HUD_MINIMAL_WIDTH,
+} from '../../src/shared/constants';
 import type { DesktopShellSettings } from '../../src/shared/types';
 
 function makeSettings(overrides?: Partial<DesktopShellSettings>): DesktopShellSettings {
@@ -156,6 +179,7 @@ function makeSettings(overrides?: Partial<DesktopShellSettings>): DesktopShellSe
     muted: false,
     bossKey: 'Alt+Shift+A',
     autoLaunch: false,
+    hudMode: 'standard',
     ...overrides,
   };
 }
@@ -322,5 +346,79 @@ describe('WindowManager', () => {
     expect(detail.bounds.x).toBeLessThan(1920);
     expect(detail.bounds.x).toBeGreaterThanOrEqual(0);
     expect(onStateChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates minimal HUD size when persisted and resizes dynamically with right-edge anchoring on applyHudMode', () => {
+    const onPositionCommitted = vi.fn();
+    const wmMinimal = new WindowManager({
+      preloadPath: '/preload.js',
+      rendererHtmlPath: '/index.html',
+      initialSettings: makeSettings({ hudMode: 'minimal' }),
+      onHudPositionCommitted: onPositionCommitted,
+      onStateChanged: vi.fn(),
+    });
+
+    wmMinimal.createHudWindow();
+    const initialMinimalHud = mockWindows[0];
+    expect(initialMinimalHud.bounds.width).toBe(HUD_MINIMAL_WIDTH);
+    expect(initialMinimalHud.bounds.height).toBe(HUD_MINIMAL_HEIGHT);
+    expect(initialMinimalHud.minWidth).toBe(HUD_MINIMAL_WIDTH);
+    expect(initialMinimalHud.minHeight).toBe(HUD_MINIMAL_HEIGHT);
+
+    // 标准窗口在右上角动态切换极简与标准模式
+    const wm = new WindowManager({
+      preloadPath: '/preload.js',
+      rendererHtmlPath: '/index.html',
+      initialSettings: makeSettings({
+        hudMode: 'standard',
+        hudPosition: { x: 1500, y: 20 },
+      }),
+      onHudPositionCommitted: onPositionCommitted,
+      onStateChanged: vi.fn(),
+    });
+    wm.createHudWindow();
+    const hud = mockWindows[1];
+    expect(hud.bounds).toEqual({
+      x: 1500,
+      y: 20,
+      width: HUD_DEFAULT_WIDTH,
+      height: HUD_DEFAULT_HEIGHT,
+    });
+
+    wm.applyHudMode('minimal');
+    expect(hud.resizeSequence).toEqual([
+      'resizable:true',
+      `minSize:${HUD_MINIMAL_WIDTH}x${HUD_MINIMAL_HEIGHT}`,
+      `bounds:${HUD_MINIMAL_WIDTH}x${HUD_MINIMAL_HEIGHT}`,
+      'resizable:false',
+    ]);
+    expect(hud.resizable).toBe(false);
+    expect(hud.minWidth).toBe(HUD_MINIMAL_WIDTH);
+    expect(hud.minHeight).toBe(HUD_MINIMAL_HEIGHT);
+    expect(hud.bounds).toEqual({
+      x: 1500 + HUD_DEFAULT_WIDTH - HUD_MINIMAL_WIDTH,
+      y: 20,
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+    expect(onPositionCommitted).toHaveBeenCalledWith({
+      x: 1500 + HUD_DEFAULT_WIDTH - HUD_MINIMAL_WIDTH,
+      y: 20,
+    });
+
+    hud.resizeSequence.length = 0;
+    wm.applyHudMode('standard');
+    expect(hud.bounds).toEqual({
+      x: 1500,
+      y: 20,
+      width: HUD_DEFAULT_WIDTH,
+      height: HUD_DEFAULT_HEIGHT,
+    });
+    expect(hud.resizeSequence).toEqual([
+      'resizable:true',
+      `minSize:${HUD_DEFAULT_WIDTH}x${HUD_DEFAULT_HEIGHT}`,
+      `bounds:${HUD_DEFAULT_WIDTH}x${HUD_DEFAULT_HEIGHT}`,
+      'resizable:false',
+    ]);
   });
 });

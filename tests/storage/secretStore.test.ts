@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   parseCredentialsEnv,
+  resolveDefaultCredentialsEnvPath,
   SecretStore,
   type SafeStorageAdapter,
 } from '../../src/main/storage/secretStore';
@@ -221,6 +222,7 @@ describe('SecretStore', () => {
       const store = new SecretStore({
         encryptedFilePath: path.join(dir, 'missing.enc'),
         safeStorage: createMockSafeStorage(false),
+        platform: 'win32',
         env: {},
       });
 
@@ -233,5 +235,36 @@ describe('SecretStore', () => {
     } finally {
       process.chdir(origCwd);
     }
+  });
+
+  it('resolves platform-specific credentials.env paths for Windows, macOS, and Linux', () => {
+    const dir = createTempDir();
+    const macCredDir = path.join(dir, 'Library', 'Application Support', 'hithink-finance');
+    fs.mkdirSync(macCredDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(macCredDir, 'credentials.env'),
+      'HITHINK_FINANCE_API_KEY="mac-file-secret"\n',
+      'utf8'
+    );
+
+    expect(resolveDefaultCredentialsEnvPath('win32', { APPDATA: 'C:\\Users\\demo\\AppData\\Roaming' })).toBe(
+      path.join('C:\\Users\\demo\\AppData\\Roaming', 'hithink-finance', 'credentials.env')
+    );
+    expect(resolveDefaultCredentialsEnvPath('darwin', {}, dir)).toBe(
+      path.join(dir, 'Library', 'Application Support', 'hithink-finance', 'credentials.env')
+    );
+    expect(resolveDefaultCredentialsEnvPath('linux', { XDG_CONFIG_HOME: '/tmp/xdg' }, '/home/demo')).toBe(
+      path.join('/tmp/xdg', 'hithink-finance', 'credentials.env')
+    );
+
+    const macStore = new SecretStore({
+      encryptedFilePath: path.join(dir, 'missing.enc'),
+      safeStorage: createMockSafeStorage(false),
+      platform: 'darwin',
+      homeDir: dir,
+      env: {},
+    });
+    expect(macStore.getApiKey()).toBe('mac-file-secret');
+    expect(macStore.getStatus().source).toBe('credentialsFile');
   });
 });
