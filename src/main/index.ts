@@ -45,6 +45,8 @@ import {
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
+// 允许无用户点击手势前在常驻 HUD 播放 Web Audio 告警提示音
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 const isDevMode = !app.isPackaged;
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -94,8 +96,10 @@ function handleAlertTriggered(event: AlertEventInput): void {
   alertDispatcher?.dispatch(event);
 }
 
-function applyAutoLaunchSetting(enabled: boolean): void {
-  if (process.platform !== 'win32' && process.platform !== 'darwin') return;
+function applyAutoLaunchSetting(enabled: boolean): boolean {
+  if (process.platform !== 'win32' && process.platform !== 'darwin') {
+    return false;
+  }
   try {
     if (app.isPackaged) {
       app.setLoginItemSettings({ openAtLogin: enabled });
@@ -106,12 +110,16 @@ function applyAutoLaunchSetting(enabled: boolean): void {
         path: process.execPath,
         args: [appArg],
       });
+    } else {
+      app.setLoginItemSettings({ openAtLogin: enabled });
     }
+    return true;
   } catch (err: unknown) {
     console.warn(
       '[main] setLoginItemSettings failed:',
       err instanceof Error ? err.message : String(err)
     );
+    return false;
   }
 }
 
@@ -177,9 +185,11 @@ function updateAutoLaunch(enabled: boolean): DesktopShellState {
   if (!settingsStore || !shellSettings) {
     throw new Error('Desktop shell is not ready.');
   }
-  const normalized = settingsStore.setAutoLaunch(enabled);
-  shellSettings = { ...shellSettings, autoLaunch: normalized };
-  applyAutoLaunchSetting(normalized);
+  const applied = applyAutoLaunchSetting(Boolean(enabled));
+  if (applied) {
+    const normalized = settingsStore.setAutoLaunch(enabled);
+    shellSettings = { ...shellSettings, autoLaunch: normalized };
+  }
   return syncShellState();
 }
 
@@ -222,6 +232,8 @@ function registerIpcHandlers(): void {
       throw new Error('SecretStore is not initialized.');
     }
     secretStore.setStoredApiKey(apiKey);
+    // 凭据更新后即时重拉权威交易日历并刷新状态，无需重启解除日历降级
+    void scheduler?.refreshCalendarNow().catch(() => {});
     return secretStore.getStatus();
   });
 
@@ -386,6 +398,10 @@ function registerIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(IPC_CHANNELS.SHELL_SET_DETAIL_MODAL_OPEN, (_event, open: boolean): void => {
+    windowManager?.setDetailEscapeSuppressed(Boolean(open));
+  });
+
   ipcMain.handle(
     IPC_CHANNELS.ALERT_GET_RECENT,
     (_event, tradeDate?: string, limit?: number) => {
@@ -407,8 +423,13 @@ function registerIpcHandlers(): void {
       if (direction !== 'SURGE' && direction !== 'SHRINK') {
         throw new Error(`Invalid alert direction: ${String(direction)}`);
       }
+      const targetSymbol = symbol?.trim() || MARKET_TOTAL_SYMBOL;
+      const watchlistName = database
+        ?.getWatchlist()
+        .find((item) => item.symbol.toUpperCase() === targetSymbol.toUpperCase())?.name;
       return alertDispatcher.dispatchSimulated(direction, {
-        symbol: symbol ?? MARKET_TOTAL_SYMBOL,
+        symbol: targetSymbol,
+        name: watchlistName,
       });
     }
   );

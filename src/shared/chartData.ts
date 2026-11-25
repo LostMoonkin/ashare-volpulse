@@ -77,7 +77,6 @@ function buildBarIncrements(
   explicitBars: ReadonlyMap<number, number>
 ): Array<number | null> {
   const result = new Array<number | null>(CHART_SLOT_COUNT).fill(null);
-  let prevValidCum: number | null = cumArr[0];
 
   for (let m = 0; m < 240; m++) {
     const slot = m + 1;
@@ -87,15 +86,16 @@ function buildBarIncrements(
     if (explicit !== undefined && isFinitePositiveOrZero(explicit)) {
       result[slot] = explicit;
     } else if (curCum !== null) {
-      if (prevValidCum !== null) {
-        result[slot] = Math.max(0, curCum - prevValidCum);
+      if (m === 0) {
+        const auctionCum = cumArr[0];
+        result[slot] = auctionCum !== null ? Math.max(0, curCum - auctionCum) : curCum;
       } else {
-        result[slot] = curCum;
+        // 仅当紧邻上一分钟存在有效累计额时才回退做差，绝不跨缺口把多分钟成交额虚增到单分钟柱上
+        const prevSlotCum = cumArr[slot - 1];
+        if (prevSlotCum !== null) {
+          result[slot] = Math.max(0, curCum - prevSlotCum);
+        }
       }
-    }
-
-    if (curCum !== null) {
-      prevValidCum = curCum;
     }
   }
   return result;
@@ -358,13 +358,16 @@ export function buildEnergyChartDataset(params: {
       }
     }
   }
+  // 实时未闭合分钟无条件以后端线性插值结果覆写（含 null），防止未插值的 60s 假急缩泄漏到图表
   if (liveMetricsMinute !== null) {
-    if (liveMetricsDevPct !== null && Number.isFinite(liveMetricsDevPct)) {
-      marginalDevSeries[liveMetricsMinute + 1] = Math.round(liveMetricsDevPct * 100) / 100;
-    }
-    if (liveMetricsSlope !== null && Number.isFinite(liveMetricsSlope)) {
-      slopeSeries[liveMetricsMinute + 1] = Math.round(liveMetricsSlope * 1000) / 1000;
-    }
+    marginalDevSeries[liveMetricsMinute + 1] =
+      liveMetricsDevPct !== null && Number.isFinite(liveMetricsDevPct)
+        ? Math.round(liveMetricsDevPct * 100) / 100
+        : null;
+    slopeSeries[liveMetricsMinute + 1] =
+      liveMetricsSlope !== null && Number.isFinite(liveMetricsSlope)
+        ? Math.round(liveMetricsSlope * 1000) / 1000
+        : null;
   }
 
   // 当日该标的异动散点（仅匹配当前展示交易日，落在边际量比趋势线上）

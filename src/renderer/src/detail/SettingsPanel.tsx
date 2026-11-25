@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ALLOWED_SLOPE_WINDOWS } from '../../../shared/constants';
 import type {
   AlertMatchModeType,
@@ -18,7 +18,37 @@ export interface SettingsPanelProps {
   bossKeyFeedback: BossKeyStatus | null;
   onBossKeyInputChange: (val: string) => void;
   onSaveBossKey: () => Promise<void>;
+  onKeepCurrentBossKey: () => Promise<void>;
   onMonitorConfigUpdated: (next: MonitorConfig) => void;
+}
+
+interface NumericDraftStrings {
+  expandThresholdPct: string;
+  shrinkThresholdPct: string;
+  surgeSlopeThreshold: string;
+  surgeMultipleThreshold: string;
+  shrinkSlopeThreshold: string;
+  shrinkMultipleThreshold: string;
+  cooldownMinutes: string;
+}
+
+function toNumericDraftStrings(cfg: MonitorConfig): NumericDraftStrings {
+  return {
+    expandThresholdPct: String(cfg.expandThresholdPct),
+    shrinkThresholdPct: String(cfg.shrinkThresholdPct),
+    surgeSlopeThreshold: String(cfg.surgeSlopeThreshold),
+    surgeMultipleThreshold: String(cfg.surgeMultipleThreshold),
+    shrinkSlopeThreshold: String(cfg.shrinkSlopeThreshold),
+    shrinkMultipleThreshold: String(cfg.shrinkMultipleThreshold),
+    cooldownMinutes: String(cfg.cooldownMinutes),
+  };
+}
+
+function parseFiniteOrFallback(raw: string, fallback: number): number {
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  const num = Number(trimmed);
+  return Number.isFinite(num) ? num : fallback;
 }
 
 function formatSecretSource(source: SecretStatus['source']): string {
@@ -41,11 +71,17 @@ export function SettingsPanel({
   bossKeyFeedback,
   onBossKeyInputChange,
   onSaveBossKey,
+  onKeepCurrentBossKey,
   onMonitorConfigUpdated,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState<MonitorConfig | null>(monitorConfig);
+  const [numDraft, setNumDraft] = useState<NumericDraftStrings | null>(
+    monitorConfig ? toNumericDraftStrings(monitorConfig) : null
+  );
   const [savingMonitor, setSavingMonitor] = useState(false);
   const [monitorSavedTip, setMonitorSavedTip] = useState<string | null>(null);
+  const [monitorError, setMonitorError] = useState<string | null>(null);
+  const savedTipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [secretStatus, setSecretStatus] = useState<SecretStatus | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -56,8 +92,19 @@ export function SettingsPanel({
   const [retention, setRetention] = useState<DatabaseRetentionStats | null>(null);
 
   useEffect(() => {
-    if (monitorConfig) setDraft(monitorConfig);
+    if (monitorConfig) {
+      setDraft(monitorConfig);
+      setNumDraft(toNumericDraftStrings(monitorConfig));
+    }
   }, [monitorConfig]);
+
+  useEffect(() => {
+    return () => {
+      if (savedTipTimerRef.current) {
+        clearTimeout(savedTipTimerRef.current);
+      }
+    };
+  }, []);
 
   const loadStorageAndSecret = () => {
     void window.api.getSecretStatus().then(setSecretStatus).catch(() => {});
@@ -71,15 +118,59 @@ export function SettingsPanel({
   const applyMonitorPatch = async (patch: Partial<MonitorConfig>) => {
     setSavingMonitor(true);
     setMonitorSavedTip(null);
+    setMonitorError(null);
+    if (savedTipTimerRef.current) {
+      clearTimeout(savedTipTimerRef.current);
+      savedTipTimerRef.current = null;
+    }
     try {
       const updated = await window.api.updateMonitorConfig(patch);
       setDraft(updated);
+      setNumDraft(toNumericDraftStrings(updated));
       onMonitorConfigUpdated(updated);
       setMonitorSavedTip('已保存并实时生效');
-      setTimeout(() => setMonitorSavedTip(null), 2200);
+      savedTipTimerRef.current = setTimeout(() => {
+        setMonitorSavedTip(null);
+        savedTipTimerRef.current = null;
+      }, 2200);
+    } catch (err: unknown) {
+      setMonitorError(`保存失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSavingMonitor(false);
     }
+  };
+
+  const handleSaveMonitorDraft = () => {
+    if (!draft || !numDraft) return;
+    const payload: MonitorConfig = {
+      ...draft,
+      expandThresholdPct: parseFiniteOrFallback(
+        numDraft.expandThresholdPct,
+        draft.expandThresholdPct
+      ),
+      shrinkThresholdPct: parseFiniteOrFallback(
+        numDraft.shrinkThresholdPct,
+        draft.shrinkThresholdPct
+      ),
+      surgeSlopeThreshold: parseFiniteOrFallback(
+        numDraft.surgeSlopeThreshold,
+        draft.surgeSlopeThreshold
+      ),
+      surgeMultipleThreshold: parseFiniteOrFallback(
+        numDraft.surgeMultipleThreshold,
+        draft.surgeMultipleThreshold
+      ),
+      shrinkSlopeThreshold: parseFiniteOrFallback(
+        numDraft.shrinkSlopeThreshold,
+        draft.shrinkSlopeThreshold
+      ),
+      shrinkMultipleThreshold: parseFiniteOrFallback(
+        numDraft.shrinkMultipleThreshold,
+        draft.shrinkMultipleThreshold
+      ),
+      cooldownMinutes: parseFiniteOrFallback(numDraft.cooldownMinutes, draft.cooldownMinutes),
+    };
+    void applyMonitorPatch(payload);
   };
 
   const handleSaveApiKey = async () => {
@@ -96,7 +187,7 @@ export function SettingsPanel({
       setSecretStatus(nextStatus);
       // 立即清空明文输入框，绝不在界面留存明文
       setApiKeyInput('');
-      setKeyFeedback('已通过系统 safeStorage 加密保存，明文已清空');
+      setKeyFeedback('已通过系统 safeStorage 加密保存，明文已清空并已触发交易日历刷新');
     } catch (err: unknown) {
       setKeyFeedback(`保存失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -112,6 +203,8 @@ export function SettingsPanel({
       const nextStatus = await window.api.clearSecretApiKey();
       setSecretStatus(nextStatus);
       setKeyFeedback('已清除软件内加密保存的 API Key');
+    } catch (err: unknown) {
+      setKeyFeedback(`清除失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setKeyBusy(false);
     }
@@ -124,6 +217,13 @@ export function SettingsPanel({
     try {
       const res = await window.api.testHithinkConnection();
       setHealthResult(res);
+    } catch (err: unknown) {
+      setHealthResult({
+        provider: 'hithink',
+        ok: false,
+        latencyMs: 0,
+        error: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setKeyBusy(false);
     }
@@ -139,18 +239,19 @@ export function SettingsPanel({
           <span>监控频率、放缩量与斜率告警参数（即时生效并持久化）</span>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             {monitorSavedTip && <span className="badge badge-down">{monitorSavedTip}</span>}
+            {monitorError && <span className="badge badge-warn">{monitorError}</span>}
             <button
               type="button"
               className="btn btn-accent"
-              disabled={!draft || savingMonitor}
-              onClick={() => draft && void applyMonitorPatch(draft)}
+              disabled={!draft || !numDraft || savingMonitor}
+              onClick={handleSaveMonitorDraft}
             >
               {savingMonitor ? '应用中…' : '保存并立即生效'}
             </button>
           </div>
         </h2>
 
-        {draft && (
+        {draft && numDraft && (
           <div className="settings-grid">
             <div className="setting-row">
               <div>
@@ -186,9 +287,9 @@ export function SettingsPanel({
                     type="number"
                     step="0.5"
                     className="num-input"
-                    value={draft.expandThresholdPct}
+                    value={numDraft.expandThresholdPct}
                     onChange={(e) =>
-                      setDraft({ ...draft, expandThresholdPct: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, expandThresholdPct: e.target.value })
                     }
                   />
                   <span>%</span>
@@ -199,9 +300,9 @@ export function SettingsPanel({
                     type="number"
                     step="0.5"
                     className="num-input"
-                    value={draft.shrinkThresholdPct}
+                    value={numDraft.shrinkThresholdPct}
                     onChange={(e) =>
-                      setDraft({ ...draft, shrinkThresholdPct: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, shrinkThresholdPct: e.target.value })
                     }
                   />
                   <span>%</span>
@@ -240,9 +341,9 @@ export function SettingsPanel({
                     type="number"
                     step="0.1"
                     className="num-input"
-                    value={draft.surgeSlopeThreshold}
+                    value={numDraft.surgeSlopeThreshold}
                     onChange={(e) =>
-                      setDraft({ ...draft, surgeSlopeThreshold: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, surgeSlopeThreshold: e.target.value })
                     }
                   />
                   <span>%/分</span>
@@ -253,9 +354,9 @@ export function SettingsPanel({
                     type="number"
                     step="0.05"
                     className="num-input"
-                    value={draft.surgeMultipleThreshold}
+                    value={numDraft.surgeMultipleThreshold}
                     onChange={(e) =>
-                      setDraft({ ...draft, surgeMultipleThreshold: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, surgeMultipleThreshold: e.target.value })
                     }
                   />
                   <span>x</span>
@@ -275,9 +376,9 @@ export function SettingsPanel({
                     type="number"
                     step="0.1"
                     className="num-input"
-                    value={draft.shrinkSlopeThreshold}
+                    value={numDraft.shrinkSlopeThreshold}
                     onChange={(e) =>
-                      setDraft({ ...draft, shrinkSlopeThreshold: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, shrinkSlopeThreshold: e.target.value })
                     }
                   />
                   <span>%/分</span>
@@ -288,9 +389,9 @@ export function SettingsPanel({
                     type="number"
                     step="0.05"
                     className="num-input"
-                    value={draft.shrinkMultipleThreshold}
+                    value={numDraft.shrinkMultipleThreshold}
                     onChange={(e) =>
-                      setDraft({ ...draft, shrinkMultipleThreshold: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, shrinkMultipleThreshold: e.target.value })
                     }
                   />
                   <span>x</span>
@@ -324,9 +425,9 @@ export function SettingsPanel({
                     max={120}
                     step={1}
                     className="num-input"
-                    value={draft.cooldownMinutes}
+                    value={numDraft.cooldownMinutes}
                     onChange={(e) =>
-                      setDraft({ ...draft, cooldownMinutes: Number(e.target.value) })
+                      setNumDraft({ ...numDraft, cooldownMinutes: e.target.value })
                     }
                   />
                   <span>分</span>
@@ -490,18 +591,17 @@ export function SettingsPanel({
           <div className="setting-row">
             <div>
               <div>全局老板键（一键隐藏 / 恢复所有窗口）</div>
-              <div
-                className="setting-desc"
-                style={{
-                  color: bossKeyFeedback?.conflictMessage ? '#f0c050' : undefined,
-                }}
-              >
-                {bossKeyFeedback?.conflictMessage
-                  ? `⚠ ${bossKeyFeedback.conflictMessage}`
-                  : bossKeyFeedback?.registered
-                    ? `已生效：${bossKeyFeedback.accelerator}`
-                    : '未注册'}
+              <div className="setting-desc">
+                当前生效：
+                {bossKeyFeedback?.registered
+                  ? `已生效 (${bossKeyFeedback.accelerator})`
+                  : '未注册'}
               </div>
+              {bossKeyFeedback?.conflictMessage && (
+                <div className="setting-desc tone-warn" role="alert">
+                  ⚠ {bossKeyFeedback.conflictMessage}
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
               <input
@@ -514,6 +614,16 @@ export function SettingsPanel({
               <button type="button" className="btn" onClick={() => void onSaveBossKey()}>
                 应用改绑
               </button>
+              {bossKeyFeedback?.registered && bossKeyFeedback.conflictMessage && (
+                <button
+                  type="button"
+                  className="btn"
+                  title="清除冲突提示并恢复当前生效快捷键"
+                  onClick={() => void onKeepCurrentBossKey()}
+                >
+                  保留当前键
+                </button>
+              )}
             </div>
           </div>
         </div>

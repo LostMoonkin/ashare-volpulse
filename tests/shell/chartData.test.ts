@@ -180,4 +180,111 @@ describe('buildEnergyChartDataset', () => {
     expect(empty.degraded).toBe(true);
     expect(empty.todayCum.every((v) => v === null)).toBe(true);
   });
+
+  it('never inflates single-minute bars across missing minute gaps or head gaps', () => {
+    const prevSeries = Array.from({ length: 20 }, (_, m) => ({
+      minuteIndex: m,
+      cumTurnover: (m + 1) * 100,
+      barTurnover: 100,
+    }));
+    // 缺失 11..14 分钟，第 15 分钟 barTurnover=null（由 core 聚合器显式留空以防跨缺口虚增）
+    const todaySeries: Array<{ minuteIndex: number; cumTurnover: number; barTurnover: number | null }> = [];
+    for (let m = 0; m <= 10; m++) {
+      todaySeries.push({ minuteIndex: m, cumTurnover: (m + 1) * 100, barTurnover: 100 });
+    }
+    todaySeries.push({ minuteIndex: 15, cumTurnover: 1600, barTurnover: null });
+    todaySeries.push({ minuteIndex: 16, cumTurnover: 1710, barTurnover: null });
+
+    const base = makeDashboard();
+    const dataset = buildEnergyChartDataset({
+      market: {
+        ...base,
+        marketTotal: {
+          ...base.marketTotal,
+          auctionTurnover: null,
+          prevAuctionTurnover: null,
+          metrics: null,
+          todaySeries,
+          prevSeries,
+        },
+      },
+      symbol: MARKET_TOTAL_SYMBOL,
+      alerts: [],
+      slopeWindow: 5,
+    });
+
+    expect(dataset.todayBar[11]).toBe(100); // minuteIndex=10 正常
+    expect(dataset.todayBar[15]).toBeNull(); // minuteIndex=14 缺失
+    expect(dataset.todayBar[16]).toBeNull(); // minuteIndex=15 跨缺口首分钟保持 null，绝不虚增为 500
+    expect(dataset.todayBar[17]).toBe(110); // minuteIndex=16 与 15 连续，可精确回退做差
+
+    // 头部缺 09:30–09:34（首根为 minuteIndex=5 且无显式 barTurnover）同样不得把 6 分钟总和归为单分钟柱
+    const headGapDataset = buildEnergyChartDataset({
+      market: {
+        ...base,
+        marketTotal: {
+          ...base.marketTotal,
+          auctionTurnover: null,
+          prevAuctionTurnover: null,
+          metrics: null,
+          todaySeries: [{ minuteIndex: 5, cumTurnover: 600, barTurnover: null }],
+          prevSeries,
+        },
+      },
+      symbol: MARKET_TOTAL_SYMBOL,
+      alerts: [],
+    });
+    expect(headGapDataset.todayBar[6]).toBeNull();
+  });
+
+  it('clears un-interpolated live minute metrics when backend live metrics are unavailable (null)', () => {
+    const prevSeries = Array.from({ length: 15 }, (_, m) => ({
+      minuteIndex: m,
+      cumTurnover: (m + 1) * 100,
+      barTurnover: 100,
+    }));
+    const todaySeries = Array.from({ length: 10 }, (_, m) => ({
+      minuteIndex: m,
+      cumTurnover: (m + 1) * 100,
+      barTurnover: 100,
+    }));
+
+    const base = makeDashboard();
+    const dataset = buildEnergyChartDataset({
+      market: {
+        ...base,
+        marketTotal: {
+          ...base.marketTotal,
+          auctionTurnover: null,
+          prevAuctionTurnover: null,
+          todaySeries,
+          prevSeries,
+          // 第 10 分钟刚走 10 秒（累计 1020），后端插值不可用返回 null
+          metrics: {
+            minuteIndex: 10,
+            elapsedSeconds: 10,
+            todayCumTurnover: 1020,
+            prevAlignedCumTurnover: null,
+            cumDiff: null,
+            cumRatio: null,
+            cumRatioPct: null,
+            predictedFullDayTurnover: null,
+            volumeState: 'UNAVAILABLE',
+            slope: null,
+            windowMultiple: null,
+            windowDeviationPct: null,
+            slopeWindow: 5,
+          },
+        },
+      },
+      symbol: MARKET_TOTAL_SYMBOL,
+      alerts: [],
+      slopeWindow: 5,
+    });
+
+    // 闭合分钟 9（slot 10）保持有效计算，但未闭合分钟 10（slot 11）不得泄漏 60s 未插值的虚假急缩值
+    expect(dataset.marginalDevSeries[10]).toBeCloseTo(0, 4);
+    expect(dataset.marginalDevSeries[11]).toBeNull();
+    expect(dataset.slopeSeries[11]).toBeNull();
+  });
 });

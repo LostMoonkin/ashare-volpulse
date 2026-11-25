@@ -17,6 +17,7 @@ import {
   formatSlopeTrend,
   formatTurnover,
   formatVolumeState,
+  getSignedToneClass,
   resolveSymbolChangePct,
   resolveSymbolPrice,
   resolveSymbolTurnover,
@@ -189,13 +190,7 @@ export function HudView() {
               {total && total.cumTurnover !== null ? formatTurnover(total.cumTurnover) : '降级/无数据'}
             </span>
             <span
-              className={
-                total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
-                  ? total.metrics.cumRatioPct >= 0
-                    ? 'tone-up'
-                    : 'tone-down'
-                  : ''
-              }
+              className={getSignedToneClass(total?.metrics?.cumRatioPct)}
               style={{ fontSize: '12px', fontWeight: 600 }}
             >
               {total?.metrics?.cumRatioPct !== null && total?.metrics?.cumRatioPct !== undefined
@@ -221,8 +216,7 @@ export function HudView() {
               const pct = resolveSymbolChangePct(item);
               const turnover = resolveSymbolTurnover(item);
               const badge = formatVolumeState(item.metrics?.volumeState);
-              const toneClass =
-                pct === null ? '' : pct >= 0 ? 'tone-up' : 'tone-down';
+              const toneClass = getSignedToneClass(pct);
               return (
                 <div
                   key={item.symbol}
@@ -249,7 +243,7 @@ export function HudView() {
         </div>
 
         {/* 自选股精简列表（可滚动 / 可折叠） */}
-        <div className="hud-watchlist-section no-drag">
+        <div className={`hud-watchlist-section no-drag ${watchlistExpanded ? '' : 'collapsed'}`}>
           <div className="hud-section-bar">
             <button
               type="button"
@@ -283,7 +277,7 @@ export function HudView() {
                   const pct = resolveSymbolChangePct(item);
                   const turnover = resolveSymbolTurnover(item);
                   const badge = formatVolumeState(item.metrics?.volumeState);
-                  const toneClass = pct === null ? '' : pct >= 0 ? 'tone-up' : 'tone-down';
+                  const toneClass = getSignedToneClass(pct);
                   return (
                     <div
                       key={item.symbol}

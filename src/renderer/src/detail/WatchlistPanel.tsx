@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { DEFAULT_ALERT_CONFIG } from '../../../core/alertEngine';
+import { MONITORED_INDEX_SYMBOLS } from '../../../shared/constants';
 import type {
   AlertMatchModeType,
   MarketDashboardState,
@@ -13,10 +15,13 @@ import {
   formatSignedPct,
   formatTurnover,
   formatVolumeState,
+  getSignedToneClass,
   resolveSymbolChangePct,
   resolveSymbolPrice,
   resolveSymbolTurnover,
 } from '../utils/format';
+
+const CORE_INDEX_SYMBOL_SET = new Set<string>(MONITORED_INDEX_SYMBOLS);
 
 export interface WatchlistPanelProps {
   watchlistRows: readonly WatchlistItemRow[];
@@ -24,6 +29,7 @@ export interface WatchlistPanelProps {
   globalConfig: MonitorConfig | null;
   onWatchlistChanged: (rows: WatchlistItemRow[]) => void;
   onJumpToChart: (symbol: string) => void;
+  onModalOpenChange?: (open: boolean) => void;
 }
 
 function parseOverride(json: string | null): WatchlistThresholdOverride {
@@ -67,6 +73,7 @@ export function WatchlistPanel({
   globalConfig,
   onWatchlistChanged,
   onJumpToChart,
+  onModalOpenChange,
 }: WatchlistPanelProps) {
   const [keyword, setKeyword] = useState('');
   const [searching, setSearching] = useState(false);
@@ -75,12 +82,41 @@ export function WatchlistPanel({
   const [draggingSymbol, setDraggingSymbol] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState<ThresholdDraft | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchReqIdRef = useRef<number>(0);
 
   const existingSymbols = new Set(watchlistRows.map((w) => w.symbol));
+
+  // 同步模态框开关状态至主进程，并在弹窗打开时用 Esc 仅关闭弹窗而不隐藏整个详情窗口
+  useEffect(() => {
+    const isOpen = editingDraft !== null;
+    onModalOpenChange?.(isOpen);
+    if (!isOpen) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setEditingDraft(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [editingDraft, onModalOpenChange]);
+
+  useEffect(() => {
+    return () => {
+      onModalOpenChange?.(false);
+    };
+  }, [onModalOpenChange]);
 
   useEffect(() => {
     const trimmed = keyword.trim();
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchReqIdRef.current += 1;
+    const reqId = searchReqIdRef.current;
+
     if (!trimmed) {
       setResults([]);
       setSearching(false);
@@ -93,12 +129,15 @@ export function WatchlistPanel({
       void window.api
         .searchTickers(trimmed, 10)
         .then((list) => {
+          if (reqId !== searchReqIdRef.current) return;
           setResults(list);
         })
         .catch((err: unknown) => {
+          if (reqId !== searchReqIdRef.current) return;
           setErrorMsg(err instanceof Error ? err.message : String(err));
         })
         .finally(() => {
+          if (reqId !== searchReqIdRef.current) return;
           setSearching(false);
         });
     }, 280);
@@ -120,18 +159,27 @@ export function WatchlistPanel({
 
   const handleRemove = async (symbol: string) => {
     setErrorMsg(null);
-    const next = await window.api.removeWatchlistItem(symbol);
-    onWatchlistChanged(next);
+    try {
+      const next = await window.api.removeWatchlistItem(symbol);
+      onWatchlistChanged(next);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleMove = async (index: number, delta: -1 | 1) => {
     const targetIdx = index + delta;
     if (targetIdx < 0 || targetIdx >= watchlistRows.length) return;
-    const symbols = watchlistRows.map((w) => w.symbol);
-    const [moved] = symbols.splice(index, 1);
-    symbols.splice(targetIdx, 0, moved);
-    const next = await window.api.reorderWatchlist(symbols);
-    onWatchlistChanged(next);
+    setErrorMsg(null);
+    try {
+      const symbols = watchlistRows.map((w) => w.symbol);
+      const [moved] = symbols.splice(index, 1);
+      symbols.splice(targetIdx, 0, moved);
+      const next = await window.api.reorderWatchlist(symbols);
+      onWatchlistChanged(next);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleDropOn = async (targetSymbol: string) => {
@@ -149,13 +197,23 @@ export function WatchlistPanel({
     const [moved] = symbols.splice(fromIdx, 1);
     symbols.splice(toIdx, 0, moved);
     setDraggingSymbol(null);
-    const next = await window.api.reorderWatchlist(symbols);
-    onWatchlistChanged(next);
+    setErrorMsg(null);
+    try {
+      const next = await window.api.reorderWatchlist(symbols);
+      onWatchlistChanged(next);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleToggleAlert = async (symbol: string, alertEnabled: boolean) => {
-    const next = await window.api.updateWatchlistItem({ symbol, alertEnabled });
-    onWatchlistChanged(next);
+    setErrorMsg(null);
+    try {
+      const next = await window.api.updateWatchlistItem({ symbol, alertEnabled });
+      onWatchlistChanged(next);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const openThresholdModal = (row: WatchlistItemRow) => {
@@ -203,22 +261,32 @@ export function WatchlistPanel({
     }
 
     const payload = Object.keys(override).length > 0 ? override : null;
-    const next = await window.api.updateWatchlistItem({
-      symbol: editingDraft.symbol,
-      customThresholds: payload,
-    });
-    onWatchlistChanged(next);
-    setEditingDraft(null);
+    setErrorMsg(null);
+    try {
+      const next = await window.api.updateWatchlistItem({
+        symbol: editingDraft.symbol,
+        customThresholds: payload,
+      });
+      onWatchlistChanged(next);
+      setEditingDraft(null);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const resetThresholdsToGlobal = async () => {
     if (!editingDraft) return;
-    const next = await window.api.updateWatchlistItem({
-      symbol: editingDraft.symbol,
-      customThresholds: null,
-    });
-    onWatchlistChanged(next);
-    setEditingDraft(null);
+    setErrorMsg(null);
+    try {
+      const next = await window.api.updateWatchlistItem({
+        symbol: editingDraft.symbol,
+        customThresholds: null,
+      });
+      onWatchlistChanged(next);
+      setEditingDraft(null);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   };
 
   return (
@@ -263,6 +331,7 @@ export function WatchlistPanel({
           <div className="search-result-list">
             {results.map((item) => {
               const added = existingSymbols.has(item.symbol);
+              const isCoreIndex = CORE_INDEX_SYMBOL_SET.has(item.symbol.toUpperCase());
               return (
                 <div key={item.symbol} className="search-result-row">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -273,10 +342,10 @@ export function WatchlistPanel({
                   <button
                     type="button"
                     className="btn"
-                    disabled={added}
+                    disabled={added || isCoreIndex}
                     onClick={() => void handleAdd(item)}
                   >
-                    {added ? '已添加' : '+ 加入自选'}
+                    {isCoreIndex ? '核心指数已监控' : added ? '已添加' : '+ 加入自选'}
                   </button>
                 </div>
               );
@@ -304,7 +373,7 @@ export function WatchlistPanel({
               const turnover = resolveSymbolTurnover(snap);
               const badge = formatVolumeState(snap?.metrics?.volumeState);
               const hasCustom = Boolean(row.customThresholdsJson);
-              const toneClass = pct === null ? '' : pct >= 0 ? 'tone-up' : 'tone-down';
+              const toneClass = getSignedToneClass(pct);
 
               return (
                 <div
@@ -447,7 +516,9 @@ export function WatchlistPanel({
                   type="number"
                   step="0.1"
                   className="text-input"
-                  placeholder={String(globalConfig?.surgeSlopeThreshold ?? 1.2)}
+                  placeholder={String(
+                    globalConfig?.surgeSlopeThreshold ?? DEFAULT_ALERT_CONFIG.surgeSlopeThreshold
+                  )}
                   value={editingDraft.surgeSlopeThreshold}
                   onChange={(e) =>
                     setEditingDraft({ ...editingDraft, surgeSlopeThreshold: e.target.value })
@@ -475,7 +546,9 @@ export function WatchlistPanel({
                   type="number"
                   step="0.1"
                   className="text-input"
-                  placeholder={String(globalConfig?.shrinkSlopeThreshold ?? -1.2)}
+                  placeholder={String(
+                    globalConfig?.shrinkSlopeThreshold ?? DEFAULT_ALERT_CONFIG.shrinkSlopeThreshold
+                  )}
                   value={editingDraft.shrinkSlopeThreshold}
                   onChange={(e) =>
                     setEditingDraft({ ...editingDraft, shrinkSlopeThreshold: e.target.value })

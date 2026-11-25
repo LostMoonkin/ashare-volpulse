@@ -3,9 +3,14 @@ import { SIMULATED_ALERT_PREFIX } from '../../../shared/constants';
 import type { AlertDirection, AlertEventRow } from '../../../shared/types';
 import { formatClockTime, formatSignedPct } from '../utils/format';
 
+export type AlertHistoryScope = 'today' | 'all';
+
 export interface AlertsPanelProps {
   alerts: readonly AlertEventRow[];
+  scope: AlertHistoryScope;
+  tradeDate?: string | null;
   isDev: boolean;
+  onScopeChange: (scope: AlertHistoryScope) => void;
   onRefresh: () => void;
   onSimulate: (direction: AlertDirection) => Promise<void>;
   onJumpToChart: (symbol: string) => void;
@@ -13,7 +18,10 @@ export interface AlertsPanelProps {
 
 export function AlertsPanel({
   alerts,
+  scope,
+  tradeDate,
   isDev,
+  onScopeChange,
   onRefresh,
   onSimulate,
   onJumpToChart,
@@ -25,8 +33,29 @@ export function AlertsPanel({
   return (
     <section className="panel-card">
       <h2 className="panel-title">
-        <span>今日异动事件流（点击记录可跳转至对应标的图表）</span>
-        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <span>
+          {scope === 'today'
+            ? `当日异动事件流${tradeDate ? ` (${tradeDate})` : ''}`
+            : '全部历史异动事件流'}
+          （点击记录可跳转至对应标的图表）
+        </span>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="segmented-group">
+            <button
+              type="button"
+              className={`seg-btn ${scope === 'today' ? 'active' : ''}`}
+              onClick={() => onScopeChange('today')}
+            >
+              当日
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${scope === 'all' ? 'active' : ''}`}
+              onClick={() => onScopeChange('all')}
+            >
+              全部历史
+            </button>
+          </div>
           <div className="segmented-group">
             <button
               type="button"

@@ -1268,4 +1268,130 @@ describe('PollingScheduler', () => {
     );
     await expect(inFlight).resolves.toBeDefined();
   });
+
+  it('reloads authoritative calendar on refreshCalendarNow after API key save and queues follow-up tick when refreshNow overlaps pollInFlight', async () => {
+    // 1. 无 Key 启动进入 CALENDAR_INFERRED_DEGRADED，随后配置 Key 并调用 refreshCalendarNow 立即解除降级
+    const dbCal = new AppDatabase(':memory:');
+    let keyReady = false;
+    const hithinkCal = createFakeHithink({ configured: false });
+    vi.spyOn(hithinkCal, 'isConfigured').mockImplementation(() => keyReady);
+    vi.mocked(hithinkCal.fetchTradingDays).mockResolvedValue([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+
+    const intradayStub = createFakeProvider('tencent', {
+      fetchIntradayMinutes: vi.fn(async (symbol) => [
+        makeIntradayDay({ symbol, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 1e9 }),
+      ]),
+    });
+
+    const calScheduler = new PollingScheduler({
+      database: dbCal,
+      primarySnapshotProvider: intradayStub,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: hithinkCal,
+      primaryIntradayProvider: intradayStub,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => shanghaiToTimestampMs('2026-11-25', 16, 0, 0),
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const degradedState = await calScheduler.tickOnce();
+    expect(degradedState.status.calendarDegraded).toBe(true);
+    expect(degradedState.status.calendarSource).toBe('inferred_degraded');
+    expect(hithinkCal.fetchTradingDays).not.toHaveBeenCalled();
+
+    keyReady = true;
+    const upgradedState = await calScheduler.refreshCalendarNow();
+    expect(hithinkCal.fetchTradingDays).toHaveBeenCalledTimes(1);
+    expect(upgradedState.status.calendarDegraded).toBe(false);
+    expect(upgradedState.status.calendarSource).toBe('hithink');
+    dbCal.close();
+
+    // 2. 在途轮询期间新增自选股并多次调用 refreshNow：合并排队补跑 1 次新鲜 tick，绝不吞掉更新
+    const dbQueue = new AppDatabase(':memory:');
+    dbQueue.upsertTradingDays([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+    dbQueue.setSetting('calendar.lastSyncedDate', '2026-11-25');
+
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      signalFirstStarted = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let snapCallCount = 0;
+    const nowLive = shanghaiToTimestampMs('2026-11-25', 10, 5, 30);
+
+    const queuePrimary = createFakeProvider('tencent', {
+      fetchIntradayMinutes: vi.fn(async (symbol) => [
+        makeIntradayDay({ symbol, tradeDate: '2026-11-24', barCount: 240, baseTurnoverPerMin: 1e9 }),
+        makeIntradayDay({ symbol, tradeDate: '2026-11-25', barCount: 35, baseTurnoverPerMin: 1.1e9 }),
+      ]),
+      fetchBatchSnapshots: vi.fn(async (symbols) => {
+        snapCallCount += 1;
+        if (snapCallCount === 1) {
+          signalFirstStarted();
+          await firstGate;
+        }
+        const map = new Map<string, QuoteSnapshot>();
+        for (const s of symbols) {
+          map.set(
+            s,
+            makeSnapshot({
+              symbol: s,
+              tradeDate: '2026-11-25',
+              timestampMs: nowLive,
+              turnover: 40e9,
+            })
+          );
+        }
+        return map;
+      }),
+    });
+
+    const queueScheduler = new PollingScheduler({
+      database: dbQueue,
+      primarySnapshotProvider: queuePrimary,
+      secondarySnapshotProvider: createFakeProvider('sina'),
+      hithinkProvider: createFakeHithink({ configured: false }),
+      primaryIntradayProvider: queuePrimary,
+      secondaryIntradayProvider: createFakeProvider('eastmoney'),
+      nowFn: () => nowLive,
+      sleepFn: async () => {},
+      backfillDelayMs: 0,
+    });
+
+    const inFlightTick = queueScheduler.tickOnce();
+    await firstStarted;
+
+    // 在途期间写入新自选股 + 调整斜率窗口，并发调用两次 refreshNow 应合并为单次补跑
+    dbQueue.upsertWatchlistItem({
+      symbol: '600519.SH',
+      name: '贵州茅台',
+      sortOrder: 0,
+      alertEnabled: true,
+      customThresholdsJson: null,
+    });
+    queueScheduler.updateEnergyConfig({ slopeWindow: 3 });
+
+    const r1 = queueScheduler.refreshNow();
+    const r2 = queueScheduler.refreshNow();
+
+    releaseFirst();
+    const [sFirst, sR1, sR2] = await Promise.all([inFlightTick, r1, r2]);
+
+    expect(sFirst.watchlist).toHaveLength(0);
+    expect(sR1.watchlist.map((w) => w.symbol)).toEqual(['600519.SH']);
+    expect(sR2.watchlist.map((w) => w.symbol)).toEqual(['600519.SH']);
+    expect(sR1.marketTotal.metrics?.slopeWindow).toBe(3);
+    expect(snapCallCount).toBe(2);
+    dbQueue.close();
+  });
 });

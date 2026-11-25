@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { MARKET_TOTAL_SYMBOL } from '../../../shared/constants';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { MARKET_TOTAL_SYMBOL, MONITORED_INDEX_SYMBOLS } from '../../../shared/constants';
 import type {
   AlertDirection,
   AlertEventRow,
@@ -18,14 +18,17 @@ import {
   formatSignedTurnover,
   formatTurnover,
   formatVolumeState,
+  getSignedToneClass,
   resolveSymbolChangePct,
   resolveSymbolPrice,
   resolveSymbolTurnover,
 } from '../utils/format';
-import { AlertsPanel } from './AlertsPanel';
+import { AlertsPanel, type AlertHistoryScope } from './AlertsPanel';
 import { EnergyDualChart } from './EnergyDualChart';
 import { SettingsPanel } from './SettingsPanel';
 import { WatchlistPanel } from './WatchlistPanel';
+
+const CORE_INDEX_SET = new Set<string>(MONITORED_INDEX_SYMBOLS);
 
 export function DetailView() {
   const [market, setMarket] = useState<MarketDashboardState | null>(null);
@@ -33,26 +36,51 @@ export function DetailView() {
   const [monitorConfig, setMonitorConfig] = useState<MonitorConfig | null>(null);
   const [watchlistRows, setWatchlistRows] = useState<WatchlistItemRow[]>([]);
   const [alerts, setAlerts] = useState<AlertEventRow[]>([]);
+  const [alertScope, setAlertScope] = useState<AlertHistoryScope>('today');
   const [activeTab, setActiveTab] = useState<DetailTab>('chart');
   const [selectedSymbol, setSelectedSymbol] = useState<string>(MARKET_TOTAL_SYMBOL);
   const [bossKeyInput, setBossKeyInput] = useState<string>('Alt+Shift+A');
   const [bossKeyFeedback, setBossKeyFeedback] = useState<BossKeyStatus | null>(null);
   const lastFocusSeqRef = useRef<number>(-1);
   const lastSavedBossKeyRef = useRef<string | null>(null);
+  const modalOpenRef = useRef<boolean>(false);
+  const alertScopeRef = useRef<AlertHistoryScope>('today');
+  const activeTradeDateRef = useRef<string | undefined>(undefined);
 
-  const loadAlerts = () => {
+  const activeTradeDate = market?.status.tradeDate ?? undefined;
+  alertScopeRef.current = alertScope;
+  activeTradeDateRef.current = activeTradeDate;
+
+  const loadAlerts = useCallback((scope?: AlertHistoryScope, tradeDate?: string) => {
+    const resolvedScope = scope ?? alertScopeRef.current;
+    const resolvedDate = resolvedScope === 'today' ? (tradeDate ?? activeTradeDateRef.current) : undefined;
     void window.api
-      .getRecentAlerts(undefined, 150)
+      .getRecentAlerts(resolvedDate, 150)
       .then(setAlerts)
       .catch(() => {});
-  };
+  }, []);
 
-  const loadWatchlist = () => {
+  const loadWatchlist = useCallback(() => {
     void window.api
       .getWatchlist()
       .then(setWatchlistRows)
       .catch(() => {});
-  };
+  }, []);
+
+  const handleModalOpenChange = useCallback((open: boolean) => {
+    modalOpenRef.current = open;
+    void window.api.setDetailModalOpen(open).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'watchlist' && modalOpenRef.current) {
+      handleModalOpenChange(false);
+    }
+  }, [activeTab, handleModalOpenChange]);
+
+  useEffect(() => {
+    loadAlerts(alertScope, activeTradeDate);
+  }, [alertScope, activeTradeDate, loadAlerts]);
 
   useEffect(() => {
     const applyShellState = (next: DesktopShellState, isInitial: boolean) => {
@@ -85,17 +113,22 @@ export function DetailView() {
         if (initial) setMarket(initial);
       })
       .catch(() => {});
-    loadAlerts();
     loadWatchlist();
 
     const unsubMarket = window.api.onMarketStateUpdated(setMarket);
     const unsubShell = window.api.onShellStateUpdated((next) => applyShellState(next, false));
+    const unsubMonitor = window.api.onMonitorConfigUpdated(setMonitorConfig);
     const unsubAlert = window.api.onAlertTriggered((payload) => {
+      const scope = alertScopeRef.current;
+      const tradeDate = activeTradeDateRef.current;
+      if (scope === 'today' && tradeDate && payload.tradeDate !== tradeDate) {
+        return;
+      }
       setAlerts((prev) => [payload, ...prev.filter((item) => item.id !== payload.id)].slice(0, 150));
     });
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.defaultPrevented && !modalOpenRef.current) {
         void window.api.hideDetail();
       }
     };
@@ -104,19 +137,63 @@ export function DetailView() {
     return () => {
       unsubMarket();
       unsubShell();
+      unsubMonitor();
       unsubAlert();
       window.removeEventListener('keydown', onKeyDown);
+      if (modalOpenRef.current) {
+        modalOpenRef.current = false;
+        void window.api.setDetailModalOpen(false).catch(() => {});
+      }
     };
-  }, []);
+  }, [loadWatchlist]);
 
   const handleSaveBossKey = async () => {
-    const status = await window.api.setBossKey(bossKeyInput);
-    setBossKeyFeedback(status);
+    try {
+      const status = await window.api.setBossKey(bossKeyInput);
+      setBossKeyFeedback(status);
+    } catch (err: unknown) {
+      setBossKeyFeedback({
+        accelerator: bossKeyFeedback?.accelerator ?? '',
+        registered: bossKeyFeedback?.registered ?? false,
+        conflictMessage: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const handleKeepCurrentBossKey = async () => {
+    const active = bossKeyFeedback?.accelerator;
+    if (!active) return;
+    setBossKeyInput(active);
+    try {
+      const status = await window.api.setBossKey(active);
+      setBossKeyFeedback(status);
+    } catch (err: unknown) {
+      setBossKeyFeedback({
+        accelerator: bossKeyFeedback?.accelerator ?? active,
+        registered: bossKeyFeedback?.registered ?? false,
+        conflictMessage: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const handleSimulate = async (direction: AlertDirection) => {
-    await window.api.simulateAlert(direction, selectedSymbol);
-    loadAlerts();
+    try {
+      await window.api.simulateAlert(direction, selectedSymbol);
+      loadAlerts();
+    } catch {
+      // 非开发态或主进程异常时静默忽略
+    }
+  };
+
+  const handleWatchlistChanged = (rows: WatchlistItemRow[]) => {
+    setWatchlistRows(rows);
+    if (
+      selectedSymbol !== MARKET_TOTAL_SYMBOL &&
+      !CORE_INDEX_SET.has(selectedSymbol) &&
+      !rows.some((r) => r.symbol === selectedSymbol)
+    ) {
+      setSelectedSymbol(MARKET_TOTAL_SYMBOL);
+    }
   };
 
   const handleJumpToChart = (symbol: string) => {
@@ -268,15 +345,7 @@ export function DetailView() {
                     {currentPrice !== null && (
                       <span style={{ fontSize: '13px', fontWeight: 600 }}>
                         {formatPrice(currentPrice)}{' '}
-                        <span
-                          className={
-                            currentChangePct === null
-                              ? ''
-                              : currentChangePct >= 0
-                                ? 'tone-up'
-                                : 'tone-down'
-                          }
-                        >
+                        <span className={getSignedToneClass(currentChangePct)}>
                           {formatSignedPct(currentChangePct, 2)}
                         </span>
                       </span>
@@ -311,13 +380,7 @@ export function DetailView() {
                   <div className="metric-item">
                     <div className="metric-label">较昨日同期</div>
                     <div
-                      className={`metric-value ${
-                        metrics?.cumRatioPct !== null && metrics?.cumRatioPct !== undefined
-                          ? metrics.cumRatioPct >= 0
-                            ? 'tone-up'
-                            : 'tone-down'
-                          : ''
-                      }`}
+                      className={`metric-value ${getSignedToneClass(metrics?.cumRatioPct)}`}
                     >
                       {metrics?.cumRatioPct !== null && metrics?.cumRatioPct !== undefined
                         ? `${formatSignedPct(metrics.cumRatioPct, 1)} / ${formatSignedTurnover(metrics.cumDiff)}`
@@ -381,16 +444,20 @@ export function DetailView() {
               watchlistRows={watchlistRows}
               market={market}
               globalConfig={monitorConfig}
-              onWatchlistChanged={(rows) => setWatchlistRows(rows)}
+              onWatchlistChanged={handleWatchlistChanged}
               onJumpToChart={handleJumpToChart}
+              onModalOpenChange={handleModalOpenChange}
             />
           )}
 
           {activeTab === 'alerts' && (
             <AlertsPanel
               alerts={alerts}
+              scope={alertScope}
+              tradeDate={activeTradeDate}
               isDev={Boolean(shell?.isDev)}
-              onRefresh={loadAlerts}
+              onScopeChange={setAlertScope}
+              onRefresh={() => loadAlerts()}
               onSimulate={handleSimulate}
               onJumpToChart={handleJumpToChart}
             />
@@ -404,6 +471,7 @@ export function DetailView() {
               bossKeyFeedback={bossKeyFeedback}
               onBossKeyInputChange={setBossKeyInput}
               onSaveBossKey={handleSaveBossKey}
+              onKeepCurrentBossKey={handleKeepCurrentBossKey}
               onMonitorConfigUpdated={(next) => setMonitorConfig(next)}
             />
           )}

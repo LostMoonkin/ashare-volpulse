@@ -1,4 +1,4 @@
-import { ALLOWED_SLOPE_WINDOWS } from '../../shared/constants';
+import { ALLOWED_SLOPE_WINDOWS, MONITORED_INDEX_SYMBOLS } from '../../shared/constants';
 import type {
   SlopeWindowOption,
   WatchlistAddInput,
@@ -9,6 +9,7 @@ import type {
 import type { AppDatabase } from './database';
 
 const THSCODE_REGEX = /^\d{6}\.(SH|SZ)$/;
+const CORE_INDEX_SYMBOL_SET = new Set<string>(MONITORED_INDEX_SYMBOLS);
 
 export function normalizeThscode(raw: string): string {
   const normalized = raw.trim().toUpperCase();
@@ -80,6 +81,9 @@ export class WatchlistService {
 
   add(input: WatchlistAddInput): WatchlistItemRow[] {
     const symbol = normalizeThscode(input.symbol);
+    if (CORE_INDEX_SYMBOL_SET.has(symbol)) {
+      throw new Error(`核心大盘指数 ${symbol} 已在顶部固定监控，无需重复加入自选股`);
+    }
     const name = input.name.trim() || symbol;
     const existing = this.db.getWatchlist();
     const found = existing.find((item) => item.symbol === symbol);

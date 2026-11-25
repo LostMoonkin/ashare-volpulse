@@ -280,6 +280,28 @@ describe('WindowManager', () => {
     expect(wm.isDetailVisible()).toBe(true);
     expect(wm.getDetailFocusSeq()).toBe(2);
 
+    // 页内模态框打开期间抑制主进程 Escape 拦截，允许 Esc 仅关闭弹窗；恢复后 Esc 再次收起详情窗
+    wm.setDetailEscapeSuppressed(true);
+    const modalEscEvent = { preventDefault: vi.fn() };
+    detail.emitWebContentsEvent('before-input-event', modalEscEvent, {
+      type: 'keyDown',
+      key: 'Escape',
+    });
+    expect(modalEscEvent.preventDefault).not.toHaveBeenCalled();
+    expect(wm.isDetailVisible()).toBe(true);
+
+    wm.setDetailEscapeSuppressed(false);
+    const closeEscEvent = { preventDefault: vi.fn() };
+    detail.emitWebContentsEvent('before-input-event', closeEscEvent, {
+      type: 'keyDown',
+      key: 'Escape',
+    });
+    expect(closeEscEvent.preventDefault).toHaveBeenCalledTimes(1);
+    expect(wm.isDetailVisible()).toBe(false);
+
+    wm.openDetail({ tab: 'settings' });
+    expect(wm.isDetailVisible()).toBe(true);
+
     // 老板键隐藏双窗：合并为单次状态广播
     onStateChanged.mockClear();
     wm.toggleBossKeyVisibility();

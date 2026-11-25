@@ -298,12 +298,16 @@ export class PollingScheduler {
   private stopped = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pollInFlight: Promise<MarketDashboardState> | null = null;
+  private queuedRefresh: Promise<MarketDashboardState> | null = null;
+  private configRevision = 0;
+  private lastTickConfigRevision = 0;
 
   private openTradingDays: string[] = [];
   private openTradingDaySet = new Set<string>();
   private calendarSource: CalendarSource = 'sqlite_cache';
   private calendarDegraded = false;
   private calendarNeedsTodayReprobe = false;
+  private calendarForceReload = false;
   private lastCalendarReprobeAt = 0;
   private initializedForDate: string | null = null;
   private lastPrunedDate: string | null = null;
@@ -396,6 +400,7 @@ export class PollingScheduler {
 
   updatePollingInterval(intervalSec: number): void {
     this.configuredIntervalSec = clampPollingInterval(intervalSec);
+    this.configRevision += 1;
     if (this.activeSnapshotProvider !== 'hithink') {
       this.effectiveIntervalSec =
         this.consecutiveFailures > 0
@@ -412,6 +417,7 @@ export class PollingScheduler {
       ...this.energyConfig,
       ...next,
     };
+    this.configRevision += 1;
     if (next.slopeWindow !== undefined) {
       this.alertEngine.updateGlobalConfig({ slopeWindow: next.slopeWindow });
     }
@@ -419,6 +425,7 @@ export class PollingScheduler {
 
   updateAlertConfig(next: Partial<AlertRuleConfig>): void {
     this.alertEngine.updateGlobalConfig(next);
+    this.configRevision += 1;
     if (next.slopeWindow !== undefined) {
       this.energyConfig = {
         ...this.energyConfig,
@@ -455,9 +462,35 @@ export class PollingScheduler {
     }
   }
 
-  /** 手动立即刷新一次；若调度器处于运行态则顺便确保后续定时唤醒正常 */
+  /** 凭据变更（如保存同花顺 Key）后强制重载权威交易日历并即时重算看板状态 */
+  async refreshCalendarNow(): Promise<MarketDashboardState> {
+    this.calendarForceReload = true;
+    this.calendarNeedsTodayReprobe = false;
+    this.configRevision += 1;
+    return this.refreshNow();
+  }
+
+  /**
+   * 手动/配置变更后立即刷新一次：
+   * - 若当前已有在途轮询，排队合并为一次紧随其后的新鲜 tick，避免吞掉刚落盘的自选股或参数改动
+   * - 若调度器处于运行态则顺便重置下一次定时唤醒
+   */
   async refreshNow(): Promise<MarketDashboardState> {
-    const state = await this.tickOnce();
+    let state: MarketDashboardState;
+    if (this.pollInFlight) {
+      if (!this.queuedRefresh) {
+        this.queuedRefresh = this.pollInFlight
+          .catch(() => undefined)
+          .then(() => {
+            this.queuedRefresh = null;
+            return this.tickOnce();
+          });
+      }
+      state = await this.queuedRefresh;
+    } else {
+      state = await this.tickOnce();
+    }
+
     if (this.running && !this.stopped) {
       this.scheduleNextTick();
     }
@@ -544,8 +577,10 @@ export class PollingScheduler {
       const watchlistSig = this.computeWatchlistSignature(this.db.getWatchlist());
       if (
         todayStr === this.initializedForDate &&
+        !this.calendarForceReload &&
         nextPhase === this.lastPhase &&
-        watchlistSig === this.lastWatchlistSignature
+        watchlistSig === this.lastWatchlistSignature &&
+        this.configRevision === this.lastTickConfigRevision
       ) {
         this.scheduleNextTick();
         return;
@@ -670,9 +705,11 @@ export class PollingScheduler {
 
     const nowMs = this.nowFn();
     const { dateStr: todayStr, secondsOfDay } = getShanghaiParts(nowMs);
+    const tickConfigRev = this.configRevision;
 
-    // 1. 首次启动或跨自然日时加载/刷新交易日历
-    if (this.initializedForDate !== todayStr) {
+    // 1. 首次启动、跨自然日或凭据更新强制重载时加载/刷新交易日历
+    if (this.calendarForceReload || this.initializedForDate !== todayStr) {
+      this.calendarForceReload = false;
       await this.initializeCalendarForDate(todayStr, nowMs);
       if (this.stopped) return this.buildStoppedFallbackState();
       this.initializedForDate = todayStr;
@@ -730,6 +767,7 @@ export class PollingScheduler {
 
     // 7. 调用 src/core/ 引擎计算最新全量看板状态并推送回调
     const state = this.buildDashboardState(watchlistItems, nowMs, phase);
+    this.lastTickConfigRevision = tickConfigRev;
     this.latestState = state;
     if (!this.stopped) {
       this.onStateUpdate?.(state);

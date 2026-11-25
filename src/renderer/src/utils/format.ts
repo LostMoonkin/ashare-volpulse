@@ -25,7 +25,7 @@ export function formatSlopeTrend(
   if (slope === null || slope === undefined || !Number.isFinite(slope)) {
     return { arrow: '·', label: '斜率待计算', tone: 'flat' };
   }
-  const slopeStr = `${slope >= 0 ? '+' : ''}${slope.toFixed(2)}%/分`;
+  const slopeStr = `${slope > 0 ? '+' : ''}${slope.toFixed(2)}%/分`;
   const multStr =
     windowMultiple !== null && windowMultiple !== undefined && Number.isFinite(windowMultiple)
       ? ` · ${windowMultiple.toFixed(2)}x`
@@ -80,6 +80,22 @@ export function formatSignedPct(pct: number | null | undefined, digits = 1): str
   }
   const sign = pct > 0 ? '+' : '';
   return `${sign}${pct.toFixed(digits)}%`;
+}
+
+/** A 股红涨绿跌语义类：严格 >0 为红，严格 <0 为绿，平盘 0 或缺失保持中性色 */
+export function getSignedToneClass(value: number | null | undefined): '' | 'tone-up' | 'tone-down' {
+  if (value === null || value === undefined || !Number.isFinite(value) || value === 0) {
+    return '';
+  }
+  return value > 0 ? 'tone-up' : 'tone-down';
+}
+
+/** A 股红涨绿跌十六进制色值（供 ECharts Tooltip 等内联样式使用） */
+export function getSignedToneColor(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value) || value === 0) {
+    return '#e6edf3';
+  }
+  return value > 0 ? '#ff7b72' : '#56d364';
 }
 
 export function formatVolumeState(state: VolumeStateType | undefined): {

@@ -51,6 +51,8 @@ const api: PreloadApi = {
     ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_BOSS_KEY, accelerator),
   setAutoLaunch: (enabled: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_AUTO_LAUNCH, enabled),
+  setDetailModalOpen: (open: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SHELL_SET_DETAIL_MODAL_OPEN, open),
 
   getRecentAlerts: (tradeDate?: string, limit?: number) =>
     ipcRenderer.invoke(IPC_CHANNELS.ALERT_GET_RECENT, tradeDate, limit),

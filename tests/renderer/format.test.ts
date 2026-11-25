@@ -2,10 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   formatClockTime,
   formatPhaseLabel,
+  formatPrice,
   formatSignedPct,
   formatSignedTurnover,
+  formatSlopeTrend,
   formatTurnover,
   formatVolumeState,
+  getSignedToneClass,
+  getSignedToneColor,
 } from '../../src/renderer/src/utils/format';
 
 describe('renderer format utils', () => {
@@ -32,5 +36,38 @@ describe('renderer format utils', () => {
     expect(formatClockTime(Date.parse('2026-11-25T02:05:09.000Z'))).toBe('10:05:09');
     expect(formatClockTime(Date.parse('2026-11-25T16:30:45.000Z'))).toBe('00:30:45');
     expect(formatClockTime(null)).toBe('—');
+  });
+
+  it('enforces A-share red-up/green-down/flat-neutral tones and marginal slope formatting', () => {
+    expect(getSignedToneClass(0.01)).toBe('tone-up');
+    expect(getSignedToneClass(-0.01)).toBe('tone-down');
+    expect(getSignedToneClass(0)).toBe('');
+    expect(getSignedToneClass(null)).toBe('');
+    expect(getSignedToneClass(Number.NaN)).toBe('');
+
+    expect(getSignedToneColor(1)).toBe('#ff7b72');
+    expect(getSignedToneColor(-1)).toBe('#56d364');
+    expect(getSignedToneColor(0)).toBe('#e6edf3');
+    expect(getSignedToneColor(undefined)).toBe('#e6edf3');
+
+    expect(formatPrice(3321.46)).toBe('3321.5');
+    expect(formatPrice(18.526)).toBe('18.53');
+    expect(formatPrice(0)).toBe('—');
+
+    expect(formatSlopeTrend(0, 1.0)).toEqual({
+      arrow: '→',
+      label: '0.00%/分 · 1.00x',
+      tone: 'flat',
+    });
+    expect(formatSlopeTrend(3.2, 1.6)).toEqual({
+      arrow: '▲',
+      label: '急放 +3.20%/分 · 1.60x',
+      tone: 'surge',
+    });
+    expect(formatSlopeTrend(-3.2, 0.6)).toEqual({
+      arrow: '▼',
+      label: '急缩 -3.20%/分 · 0.60x',
+      tone: 'shrink',
+    });
   });
 });

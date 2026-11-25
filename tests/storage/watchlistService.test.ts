@@ -79,10 +79,15 @@ describe('WatchlistService', () => {
     expect(reloaded.map((r) => r.symbol)).toEqual(['002594.SZ', '600519.SH']);
   });
 
-  it('rejects invalid non-SH/SZ symbols', () => {
+  it('rejects invalid non-SH/SZ symbols and monitored core indices', () => {
     const db = createMemoryDb();
     const service = new WatchlistService(db);
     expect(() => service.add({ symbol: '830799.BJ', name: '北证测试' })).toThrow();
     expect(() => service.add({ symbol: 'INVALID', name: '无效代码' })).toThrow();
+
+    // 五大固定监控指数严禁重复加入自选股
+    for (const idx of ['000001.SH', '399001.SZ', '399006.SZ', '000688.SH', '399106.SZ']) {
+      expect(() => service.add({ symbol: idx, name: '核心指数' })).toThrow(/核心大盘指数/);
+    }
   });
 });

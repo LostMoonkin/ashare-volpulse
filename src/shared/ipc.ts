@@ -50,6 +50,7 @@ export const IPC_CHANNELS = {
   SHELL_SET_MUTED: 'shell:set-muted',
   SHELL_SET_BOSS_KEY: 'shell:set-boss-key',
   SHELL_SET_AUTO_LAUNCH: 'shell:set-auto-launch',
+  SHELL_SET_DETAIL_MODAL_OPEN: 'shell:set-detail-modal-open',
 } as const;
 
 /** 通过 contextBridge 暴露给渲染进程的严格类型化 API */
@@ -79,6 +80,7 @@ export interface PreloadApi {
   setMuted(muted: boolean): Promise<DesktopShellState>;
   setBossKey(accelerator: string): Promise<BossKeyStatus>;
   setAutoLaunch(enabled: boolean): Promise<DesktopShellState>;
+  setDetailModalOpen(open: boolean): Promise<void>;
   getRecentAlerts(tradeDate?: string, limit?: number): Promise<AlertEventRow[]>;
   simulateAlert(direction: AlertDirection, symbol?: string): Promise<AlertDispatchPayload>;
   onMarketStateUpdated(listener: (state: MarketDashboardState) => void): () => void;

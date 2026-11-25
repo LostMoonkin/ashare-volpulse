@@ -99,6 +99,7 @@ export class WindowManager {
   private hudDesiredVisible = true;
   private detailReady = false;
   private detailDesiredVisible = false;
+  private detailEscapeSuppressed = false;
   private suppressStateEvents = false;
   private isQuitting = false;
   private moveSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -382,9 +383,9 @@ export class WindowManager {
       }
     });
 
-    // 失焦不销毁、不自动隐藏；仅按 Esc 或点击收起按钮隐藏
+    // 失焦不销毁、不自动隐藏；仅按 Esc（且当前无页内模态框打开）或点击收起按钮隐藏
     win.webContents.on('before-input-event', (event, input) => {
-      if (input.type === 'keyDown' && input.key === 'Escape') {
+      if (input.type === 'keyDown' && input.key === 'Escape' && !this.detailEscapeSuppressed) {
         event.preventDefault();
         this.hideDetail();
       }
@@ -487,8 +488,13 @@ export class WindowManager {
     });
   }
 
+  setDetailEscapeSuppressed(suppressed: boolean): void {
+    this.detailEscapeSuppressed = Boolean(suppressed);
+  }
+
   hideDetail(): void {
     this.detailDesiredVisible = false;
+    this.detailEscapeSuppressed = false;
     if (this.detailWindow && !this.detailWindow.isDestroyed() && this.detailWindow.isVisible()) {
       this.withBatchedStateChange(() => {
         this.detailWindow?.hide();
