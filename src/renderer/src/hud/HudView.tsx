@@ -42,6 +42,10 @@ export interface HudContentProps {
   monitorConfig: MonitorConfig | null;
   activeAlert: AlertDispatchPayload | null;
   watchlistExpanded: boolean;
+  trayBannerDismissed?: boolean;
+  onDismissTrayBanner?: () => void;
+  onRetryTray?: () => void;
+  onQuitApp?: () => void;
   onToggleWatchlistExpanded: () => void;
   onSetHudMode: (mode: HudMode) => void;
   onSetAlwaysOnTop: (alwaysOnTop: boolean) => void;
@@ -59,6 +63,10 @@ export function HudContent({
   monitorConfig,
   activeAlert,
   watchlistExpanded,
+  trayBannerDismissed = false,
+  onDismissTrayBanner,
+  onRetryTray,
+  onQuitApp,
   onToggleWatchlistExpanded,
   onSetHudMode,
   onSetAlwaysOnTop,
@@ -70,6 +78,13 @@ export function HudContent({
   onSimulate,
 }: HudContentProps) {
   const isMinimal = shell?.settings.hudMode === 'minimal';
+  const trayStatus = shell?.trayStatus ?? null;
+  const showTrayFallbackBanner = Boolean(
+    trayStatus &&
+      !trayStatus.available &&
+      trayStatus.state !== 'retrying' &&
+      !trayBannerDismissed
+  );
   const total = market?.marketTotal ?? null;
   const status = market?.status ?? null;
   const replay = status?.replay?.active ? status.replay : null;
@@ -152,6 +167,17 @@ export function HudContent({
               title="点击前往设置改绑老板键"
             >
               ⚠ {shell.bossKeyStatus.conflictMessage}
+            </div>
+          )}
+
+          {showTrayFallbackBanner && (
+            <div
+              className="hud-conflict-banner hud-conflict-banner-minimal no-drag"
+              role="alert"
+              onClick={() => onOpenDetail({ tab: 'settings' })}
+              title="点击打开设置，可重建托盘或退出应用"
+            >
+              ⚠ 系统托盘未就绪 · 点击打开设置重试或退出
             </div>
           )}
 
@@ -313,7 +339,12 @@ export function HudContent({
             <button
               type="button"
               className="icon-btn"
-              title="最小化至系统托盘"
+              title={
+                trayStatus?.state === 'failed'
+                  ? '系统托盘未就绪，请通过提示栏或设置退出应用'
+                  : '最小化至系统托盘'
+              }
+              disabled={trayStatus?.state === 'failed'}
               onClick={onHideHud}
             >
               ×
@@ -330,6 +361,49 @@ export function HudContent({
             title="点击前往设置改绑老板键"
           >
             ⚠ {shell.bossKeyStatus.conflictMessage}
+          </div>
+        )}
+
+        {/* 托盘异常兜底提示与退出/重试入口 */}
+        {showTrayFallbackBanner && trayStatus && (
+          <div className="hud-tray-banner no-drag" role="alert">
+            <div className="hud-tray-banner-text">
+              ⚠ {trayStatus.message ?? '未检测到系统托盘图标'}
+            </div>
+            <div className="hud-tray-banner-actions">
+              <button
+                type="button"
+                className="icon-btn"
+                title="重新尝试注册系统托盘图标"
+                onClick={() => onRetryTray?.()}
+              >
+                重试托盘
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title="打开设置面板"
+                onClick={() => onOpenDetail({ tab: 'settings' })}
+              >
+                设置
+              </button>
+              <button
+                type="button"
+                className="icon-btn hud-tray-quit-btn"
+                title="直接退出应用程序"
+                onClick={() => onQuitApp?.()}
+              >
+                退出
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title="暂时隐藏此提示（可随时在设置中重建托盘或退出）"
+                onClick={() => onDismissTrayBanner?.()}
+              >
+                忽略
+              </button>
+            </div>
           </div>
         )}
 
@@ -577,7 +651,14 @@ export function HudView() {
   const [monitorConfig, setMonitorConfig] = useState<MonitorConfig | null>(null);
   const [activeAlert, setActiveAlert] = useState<AlertDispatchPayload | null>(null);
   const [watchlistExpanded, setWatchlistExpanded] = useState<boolean>(true);
+  const [trayBannerDismissed, setTrayBannerDismissed] = useState<boolean>(false);
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (shell?.trayStatus.available) {
+      setTrayBannerDismissed(false);
+    }
+  }, [shell?.trayStatus.available]);
 
   useEffect(() => {
     void window.api.getShellState().then(setShell).catch(() => {});
@@ -630,6 +711,13 @@ export function HudView() {
       monitorConfig={monitorConfig}
       activeAlert={activeAlert}
       watchlistExpanded={watchlistExpanded}
+      trayBannerDismissed={trayBannerDismissed}
+      onDismissTrayBanner={() => setTrayBannerDismissed(true)}
+      onRetryTray={() => {
+        setTrayBannerDismissed(false);
+        void window.api.retryTray().then(setShell).catch(() => {});
+      }}
+      onQuitApp={() => void window.api.quitApp()}
       onToggleWatchlistExpanded={() => setWatchlistExpanded((v) => !v)}
       onSetHudMode={(mode) => void window.api.setHudMode(mode)}
       onSetAlwaysOnTop={(alwaysOnTop) => void window.api.setAlwaysOnTop(alwaysOnTop)}

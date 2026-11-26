@@ -6,12 +6,17 @@ export {
   type NormalizedAcceleratorResult,
 } from './bossKeyManager';
 export {
+  clearTrayIconCache,
   generateTrayIconPng,
   getTrayNativeImage,
   resolveTrayIconMood,
   type TrayIconMood,
 } from './trayIcon';
-export { TrayManager, type TrayManagerActions } from './trayManager';
+export {
+  TrayManager,
+  type TrayManagerActions,
+  type TrayManagerOptions,
+} from './trayManager';
 export {
   formatTrayTooltip,
   formatTurnoverCompact,

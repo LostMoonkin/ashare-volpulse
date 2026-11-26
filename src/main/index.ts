@@ -88,6 +88,12 @@ function buildShellState(): DesktopShellState {
   return {
     settings: { ...shellSettings },
     bossKeyStatus: bossKeyManager.getStatus(),
+    trayStatus: trayManager?.getStatus() ?? {
+      state: 'ready',
+      available: true,
+      attempts: 0,
+      message: null,
+    },
     hudVisible: windowManager.isHudVisible(),
     detailVisible: windowManager.isDetailVisible(),
     activeDetailSymbol: windowManager.getActiveDetailSymbol(),
@@ -461,6 +467,15 @@ function registerIpcHandlers(): void {
     windowManager?.setDetailEscapeSuppressed(Boolean(open));
   });
 
+  ipcMain.handle(IPC_CHANNELS.SHELL_RETRY_TRAY, (): DesktopShellState => {
+    trayManager?.retry();
+    return syncShellState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SHELL_QUIT_APP, (): void => {
+    requestQuit();
+  });
+
   ipcMain.handle(
     IPC_CHANNELS.ALERT_GET_RECENT,
     (_event, tradeDate?: string, limit?: number) => {
@@ -639,6 +654,11 @@ function initServices(): void {
           }
         : undefined,
     onQuit: requestQuit,
+    onStatusChange: () => {
+      if (shellSettings && windowManager && bossKeyManager) {
+        windowManager.broadcast(IPC_CHANNELS.SHELL_STATE_UPDATED, buildShellState());
+      }
+    },
   });
 
   if (replayCliOptions) {

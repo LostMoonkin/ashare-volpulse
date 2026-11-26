@@ -183,21 +183,67 @@ export function resolveTrayIconMood(state: MarketDashboardState | null): TrayIco
 
 const iconCache = new Map<TrayIconMood, NativeImage>();
 
+function isNativeImageUsable(img: NativeImage | null | undefined): img is NativeImage {
+  if (!img) return false;
+  if (typeof img.isEmpty === 'function') {
+    return !img.isEmpty();
+  }
+  return true;
+}
+
+export function clearTrayIconCache(): void {
+  iconCache.clear();
+}
+
 export function getTrayNativeImage(mood: TrayIconMood): NativeImage {
   const cached = iconCache.get(mood);
-  if (cached) return cached;
+  if (cached && isNativeImageUsable(cached)) return cached;
   const png1x = generateTrayIconPng(mood, 16);
   const png2x = generateTrayIconPng(mood, 32);
 
-  let img: NativeImage;
+  let img: NativeImage | null = null;
+
+  // 传入编码后的 PNG Buffer 时不附加 width/height（width/height 仅面向原始位图 buffer），避免跨版本误解析
   if (typeof nativeImage.createEmpty === 'function') {
-    img = nativeImage.createEmpty();
-    img.addRepresentation({ scaleFactor: 1.0, width: 16, height: 16, buffer: png1x });
-    img.addRepresentation({ scaleFactor: 2.0, width: 32, height: 32, buffer: png2x });
-  } else {
-    img = nativeImage.createFromBuffer(png2x, { scaleFactor: 2.0 });
+    const candidate = nativeImage.createEmpty();
+    candidate.addRepresentation({ scaleFactor: 1.0, buffer: png1x });
+    candidate.addRepresentation({ scaleFactor: 2.0, buffer: png2x });
+    if (isNativeImageUsable(candidate)) {
+      img = candidate;
+    }
   }
 
-  iconCache.set(mood, img);
+  // 多级兜底：若多分辨率表示产出空图，依次回退至 createFromBuffer 与 createFromDataURL
+  if (!img && typeof nativeImage.createFromBuffer === 'function') {
+    const candidate2x = nativeImage.createFromBuffer(png2x, { scaleFactor: 2.0 });
+    if (isNativeImageUsable(candidate2x)) {
+      img = candidate2x;
+    } else {
+      const candidate1x = nativeImage.createFromBuffer(png1x);
+      if (isNativeImageUsable(candidate1x)) {
+        img = candidate1x;
+      }
+    }
+  }
+
+  if (!img && typeof nativeImage.createFromDataURL === 'function') {
+    const candidateUrl = nativeImage.createFromDataURL(
+      `data:image/png;base64,${png1x.toString('base64')}`
+    );
+    if (isNativeImageUsable(candidateUrl)) {
+      img = candidateUrl;
+    }
+  }
+
+  if (!img) {
+    img =
+      typeof nativeImage.createFromBuffer === 'function'
+        ? nativeImage.createFromBuffer(png2x, { scaleFactor: 2.0 })
+        : nativeImage.createEmpty();
+  }
+
+  if (isNativeImageUsable(img)) {
+    iconCache.set(mood, img);
+  }
   return img;
 }

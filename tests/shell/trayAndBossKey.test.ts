@@ -4,21 +4,37 @@ const {
   mockRepresentations,
   mockTrayInstances,
   mockBuiltMenuTemplates,
+  mockNativeImageConfig,
+  mockTrayBehavior,
 } = vi.hoisted(() => ({
-  mockRepresentations: [] as Array<Array<{ scaleFactor: number; width: number; height: number }>>,
+  mockRepresentations: [] as Array<
+    Array<{ scaleFactor: number; width?: number; height?: number; buffer?: Buffer }>
+  >,
   mockTrayInstances: [] as Array<{
     image: unknown;
     tooltip: string;
     menu: unknown;
     destroyed: boolean;
+    bounds: { x: number; y: number; width: number; height: number };
     listeners: Map<string, () => void>;
     setToolTip: ReturnType<typeof vi.fn>;
     setImage: ReturnType<typeof vi.fn>;
     setContextMenu: ReturnType<typeof vi.fn>;
+    getBounds: ReturnType<typeof vi.fn>;
     on: ReturnType<typeof vi.fn>;
     destroy: ReturnType<typeof vi.fn>;
   }>,
   mockBuiltMenuTemplates: [] as Array<Array<Record<string, unknown>>>,
+  mockNativeImageConfig: {
+    emptyOnCreateEmpty: false,
+    emptyOnCreateFromBuffer: false,
+    createFromBufferCalls: 0,
+    createFromDataURLCalls: 0,
+  },
+  mockTrayBehavior: {
+    nextBoundsQueue: [] as Array<{ x: number; y: number; width: number; height: number }>,
+    throwOnConstructCount: 0,
+  },
 }));
 
 vi.mock('electron', () => ({
@@ -29,16 +45,34 @@ vi.mock('electron', () => ({
   },
   nativeImage: {
     createEmpty: vi.fn(() => {
-      const reps: Array<{ scaleFactor: number; width: number; height: number }> = [];
+      const reps: Array<{ scaleFactor: number; width?: number; height?: number; buffer?: Buffer }> =
+        [];
       mockRepresentations.push(reps);
       return {
-        addRepresentation: vi.fn((rep: { scaleFactor: number; width: number; height: number }) => {
-          reps.push(rep);
-        }),
+        addRepresentation: vi.fn(
+          (rep: { scaleFactor: number; width?: number; height?: number; buffer?: Buffer }) => {
+            reps.push(rep);
+          }
+        ),
+        isEmpty: vi.fn(() => mockNativeImageConfig.emptyOnCreateEmpty || reps.length === 0),
         reps,
       };
     }),
-    createFromBuffer: vi.fn(() => ({ resize: vi.fn() })),
+    createFromBuffer: vi.fn(() => {
+      mockNativeImageConfig.createFromBufferCalls += 1;
+      return {
+        resize: vi.fn(),
+        isEmpty: vi.fn(() => mockNativeImageConfig.emptyOnCreateFromBuffer),
+        source: 'createFromBuffer',
+      };
+    }),
+    createFromDataURL: vi.fn(() => {
+      mockNativeImageConfig.createFromDataURLCalls += 1;
+      return {
+        isEmpty: vi.fn(() => false),
+        source: 'createFromDataURL',
+      };
+    }),
   },
   Menu: {
     buildFromTemplate: vi.fn((template: Array<Record<string, unknown>>) => {
@@ -47,12 +81,23 @@ vi.mock('electron', () => ({
     }),
   },
   Tray: vi.fn(function (this: unknown, image: unknown) {
+    if (mockTrayBehavior.throwOnConstructCount > 0) {
+      mockTrayBehavior.throwOnConstructCount -= 1;
+      throw new Error('Native Tray constructor failed');
+    }
     const listeners = new Map<string, () => void>();
+    const initialBounds = mockTrayBehavior.nextBoundsQueue.shift() ?? {
+      x: 1800,
+      y: 1040,
+      width: 24,
+      height: 40,
+    };
     const instance = {
       image,
       tooltip: '',
       menu: null as unknown,
       destroyed: false,
+      bounds: initialBounds,
       listeners,
       setToolTip: vi.fn((tip: string) => {
         instance.tooltip = tip;
@@ -63,6 +108,7 @@ vi.mock('electron', () => ({
       setContextMenu: vi.fn((menu: unknown) => {
         instance.menu = menu;
       }),
+      getBounds: vi.fn(() => instance.bounds),
       on: vi.fn((event: string, cb: () => void) => {
         listeners.set(event, cb);
       }),
@@ -78,6 +124,7 @@ vi.mock('electron', () => ({
 import {
   BossKeyManager,
   TrayManager,
+  clearTrayIconCache,
   formatTrayTooltip,
   generateTrayIconPng,
   getTrayNativeImage,
@@ -211,10 +258,49 @@ describe('trayTooltip and trayIcon', () => {
     expect(exp.readUInt32BE(16)).toBe(32);
 
     const beforeCount = mockRepresentations.length;
+    clearTrayIconCache();
     getTrayNativeImage('expanding');
-    expect(mockRepresentations.length).toBeGreaterThanOrEqual(beforeCount);
+    expect(mockRepresentations.length).toBeGreaterThan(beforeCount);
     const lastReps = mockRepresentations[mockRepresentations.length - 1];
     expect(lastReps.map((r) => r.scaleFactor)).toEqual([1.0, 2.0]);
+    // 传入 PNG Buffer 时不应附带仅用于 raw bitmap 的 width/height 字段，且 buffer 必须为 Node Buffer
+    for (const rep of lastReps) {
+      expect(Buffer.isBuffer(rep.buffer)).toBe(true);
+      expect(rep.width).toBeUndefined();
+      expect(rep.height).toBeUndefined();
+    }
+  });
+
+  it('falls back to createFromBuffer and createFromDataURL when addRepresentation yields an empty image', () => {
+    clearTrayIconCache();
+    mockNativeImageConfig.emptyOnCreateEmpty = true;
+    mockNativeImageConfig.emptyOnCreateFromBuffer = false;
+    const beforeBufCalls = mockNativeImageConfig.createFromBufferCalls;
+
+    try {
+      const fallbackBufImg = getTrayNativeImage('flat') as unknown as {
+        source?: string;
+        isEmpty: () => boolean;
+      };
+      expect(fallbackBufImg.source).toBe('createFromBuffer');
+      expect(fallbackBufImg.isEmpty()).toBe(false);
+      expect(mockNativeImageConfig.createFromBufferCalls).toBeGreaterThan(beforeBufCalls);
+
+      clearTrayIconCache();
+      mockNativeImageConfig.emptyOnCreateFromBuffer = true;
+      const beforeUrlCalls = mockNativeImageConfig.createFromDataURLCalls;
+      const fallbackUrlImg = getTrayNativeImage('degraded') as unknown as {
+        source?: string;
+        isEmpty: () => boolean;
+      };
+      expect(fallbackUrlImg.source).toBe('createFromDataURL');
+      expect(fallbackUrlImg.isEmpty()).toBe(false);
+      expect(mockNativeImageConfig.createFromDataURLCalls).toBeGreaterThan(beforeUrlCalls);
+    } finally {
+      mockNativeImageConfig.emptyOnCreateEmpty = false;
+      mockNativeImageConfig.emptyOnCreateFromBuffer = false;
+      clearTrayIconCache();
+    }
   });
 });
 
@@ -235,6 +321,12 @@ describe('TrayManager', () => {
         accelerator: 'Alt+Shift+A',
         registered: true,
         conflictMessage: null,
+      },
+      trayStatus: {
+        state: 'ready',
+        available: true,
+        attempts: 1,
+        message: null,
       },
       hudVisible: true,
       detailVisible: false,
@@ -358,6 +450,89 @@ describe('TrayManager', () => {
 
     macTrayMgr.destroy();
     expect(macTrayInstance.destroyed).toBe(true);
+  });
+
+  it('retries Windows tray registration when bounds are zero, promotes on recovery or interaction, and supports manual retry', () => {
+    vi.useFakeTimers();
+    try {
+      const zeroBounds = { x: 0, y: 0, width: 0, height: 0 };
+      const validBounds = { x: 1800, y: 1040, width: 24, height: 40 };
+      const statusHistory: string[] = [];
+
+      const baseActions = {
+        onToggleHud: vi.fn(),
+        onToggleDetail: vi.fn(),
+        onToggleMinimalMode: vi.fn(),
+        onToggleAlwaysOnTop: vi.fn(),
+        onToggleMuted: vi.fn(),
+        onToggleAutoLaunch: vi.fn(),
+        onRefreshNow: vi.fn(),
+        onOpenSettings: vi.fn(),
+        onQuit: vi.fn(),
+        onStatusChange: vi.fn((status: { state: string }) => {
+          statusHistory.push(status.state);
+        }),
+      };
+
+      // 场景 1：前 2 次全 0（模拟 NIM_ADD 失败），第 2 次重试后恢复非零区域
+      mockTrayBehavior.nextBoundsQueue.push(zeroBounds, zeroBounds, validBounds);
+      const recoveringMgr = new TrayManager(baseActions, 'win32', {
+        retryDelaysMs: [100, 200],
+      });
+      recoveringMgr.init(makeShellState(), makeDashboardState());
+      expect(recoveringMgr.getStatus().state).toBe('retrying');
+      expect(recoveringMgr.getStatus().available).toBe(false);
+
+      vi.advanceTimersByTime(100);
+      expect(recoveringMgr.getStatus().state).toBe('retrying');
+      expect(recoveringMgr.getStatus().attempts).toBe(2);
+
+      vi.advanceTimersByTime(200);
+      expect(recoveringMgr.getStatus().state).toBe('ready');
+      expect(recoveringMgr.getStatus().available).toBe(true);
+      expect(recoveringMgr.getStatus().attempts).toBe(3);
+      recoveringMgr.destroy();
+
+      // 场景 2：所有自动重试均返回全 0 → 进入 unverified 并保留最后一个实例；收到 mouse-move 立即转正
+      mockTrayBehavior.nextBoundsQueue.push(zeroBounds, zeroBounds);
+      const unverifiedMgr = new TrayManager(baseActions, 'win32', {
+        retryDelaysMs: [100],
+      });
+      unverifiedMgr.init(makeShellState(), makeDashboardState());
+      vi.advanceTimersByTime(100);
+      expect(unverifiedMgr.getStatus().state).toBe('unverified');
+      expect(unverifiedMgr.getStatus().available).toBe(false);
+      expect(unverifiedMgr.getStatus().message).toContain('未检测到系统托盘图标');
+
+      const lastInstance = mockTrayInstances[mockTrayInstances.length - 1];
+      expect(lastInstance.destroyed).toBe(false);
+      lastInstance.listeners.get('mouse-move')?.();
+      expect(unverifiedMgr.getStatus().state).toBe('ready');
+      expect(unverifiedMgr.getStatus().available).toBe(true);
+      unverifiedMgr.destroy();
+
+      // 场景 3：手动 retry() 重建并恢复；且对已抛错场景最终标为 failed
+      mockTrayBehavior.throwOnConstructCount = 1;
+      const failedMgr = new TrayManager(baseActions, 'win32', { retryDelaysMs: [] });
+      failedMgr.init(makeShellState(), makeDashboardState());
+      expect(failedMgr.getStatus().state).toBe('failed');
+      expect(failedMgr.getStatus().available).toBe(false);
+
+      mockTrayBehavior.nextBoundsQueue.push(validBounds);
+      const retried = failedMgr.retry();
+      expect(retried.state).toBe('ready');
+      expect(retried.available).toBe(true);
+      failedMgr.destroy();
+
+      expect(statusHistory).toContain('retrying');
+      expect(statusHistory).toContain('unverified');
+      expect(statusHistory).toContain('failed');
+      expect(statusHistory).toContain('ready');
+    } finally {
+      mockTrayBehavior.nextBoundsQueue.length = 0;
+      mockTrayBehavior.throwOnConstructCount = 0;
+      vi.useRealTimers();
+    }
   });
 });
 

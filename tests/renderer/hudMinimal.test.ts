@@ -68,7 +68,15 @@ function makeIndex(symbol: string, name: string): SymbolEnergySnapshot {
   };
 }
 
-function makeShellState(hudMode: HudMode): DesktopShellState {
+function makeShellState(
+  hudMode: HudMode,
+  trayStatus: DesktopShellState['trayStatus'] = {
+    state: 'ready',
+    available: true,
+    attempts: 1,
+    message: null,
+  }
+): DesktopShellState {
   return {
     settings: {
       hudPosition: null,
@@ -85,6 +93,7 @@ function makeShellState(hudMode: HudMode): DesktopShellState {
       registered: true,
       conflictMessage: null,
     },
+    trayStatus,
     hudVisible: true,
     detailVisible: false,
     activeDetailSymbol: 'MARKET_TOTAL',
@@ -335,5 +344,67 @@ describe('HUD minimal mode', () => {
     expect(hiddenAllIndicesHtml).not.toContain('hud-list-section');
     expect(hiddenAllIndicesHtml).toContain('沪深两市总成交额');
     expect(hiddenAllIndicesHtml).toContain('贵州茅台');
+  });
+
+  it('shows tray fallback banner with retry/quit controls only when tray is unavailable, keeping minimal button budget intact', () => {
+    // 托盘正常或自动重试中不弹出干扰横幅
+    const readyStdHtml = renderHud({
+      shell: makeShellState('standard', {
+        state: 'ready',
+        available: true,
+        attempts: 1,
+        message: null,
+      }),
+    });
+    expect(readyStdHtml).not.toContain('hud-tray-banner');
+
+    const retryingStdHtml = renderHud({
+      shell: makeShellState('standard', {
+        state: 'retrying',
+        available: false,
+        attempts: 2,
+        message: '正在尝试重新注册系统托盘图标…',
+      }),
+    });
+    expect(retryingStdHtml).not.toContain('hud-tray-banner');
+
+    // 托盘未检测到时：标准模式展示重试/设置/退出/忽略横幅
+    const unverifiedStdHtml = renderHud({
+      shell: makeShellState('standard', {
+        state: 'unverified',
+        available: false,
+        attempts: 4,
+        message: '未检测到系统托盘图标',
+      }),
+    });
+    expect(unverifiedStdHtml).toContain('hud-tray-banner');
+    expect(unverifiedStdHtml).toContain('未检测到系统托盘图标');
+    expect(unverifiedStdHtml).toContain('>重试托盘</button>');
+    expect(unverifiedStdHtml).toContain('>退出</button>');
+    expect(unverifiedStdHtml).toContain('>忽略</button>');
+
+    // 托盘硬失败时：隐藏按钮禁用，避免用户把唯一可见窗口藏至不存在的托盘
+    const failedStdHtml = renderHud({
+      shell: makeShellState('standard', {
+        state: 'failed',
+        available: false,
+        attempts: 4,
+        message: '系统托盘创建失败',
+      }),
+    });
+    expect(failedStdHtml).toContain('hud-tray-banner');
+    expect(failedStdHtml).toContain('disabled=""');
+
+    // 托盘异常时极简模式仅显示紧凑提示条，不破坏“唯一标准按钮”约束
+    const unverifiedMinHtml = renderHud({
+      shell: makeShellState('minimal', {
+        state: 'unverified',
+        available: false,
+        attempts: 4,
+        message: '未检测到系统托盘图标',
+      }),
+    });
+    expect(unverifiedMinHtml).toContain('系统托盘未就绪');
+    expect((unverifiedMinHtml.match(/<button\b/g) ?? []).length).toBe(1);
   });
 });

@@ -55,6 +55,8 @@ export const IPC_CHANNELS = {
   SHELL_SET_AUTO_LAUNCH: 'shell:set-auto-launch',
   SHELL_SET_HUD_MODE: 'shell:set-hud-mode',
   SHELL_SET_DETAIL_MODAL_OPEN: 'shell:set-detail-modal-open',
+  SHELL_RETRY_TRAY: 'shell:retry-tray',
+  SHELL_QUIT_APP: 'shell:quit-app',
 } as const;
 
 /** 通过 contextBridge 暴露给渲染进程的严格类型化 API */
@@ -86,6 +88,8 @@ export interface PreloadApi {
   setAutoLaunch(enabled: boolean): Promise<DesktopShellState>;
   setHudMode(mode: HudMode): Promise<DesktopShellState>;
   setDetailModalOpen(open: boolean): Promise<void>;
+  retryTray(): Promise<DesktopShellState>;
+  quitApp(): Promise<void>;
   getRecentAlerts(tradeDate?: string, limit?: number): Promise<AlertEventRow[]>;
   markAlertRead(id: number): Promise<boolean>;
   markAllAlertsRead(tradeDate?: string): Promise<number>;

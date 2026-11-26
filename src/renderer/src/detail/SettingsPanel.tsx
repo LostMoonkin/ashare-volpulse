@@ -765,6 +765,37 @@ export function SettingsPanel({
               )}
             </div>
           </div>
+
+          <div className="setting-row">
+            <div>
+              <div>系统托盘与应用退出</div>
+              <div
+                className={`setting-desc ${shell?.trayStatus && !shell.trayStatus.available ? 'tone-warn' : ''}`}
+              >
+                {shell?.trayStatus.state === 'retrying'
+                  ? `正在尝试重新注册系统托盘图标（已尝试 ${shell.trayStatus.attempts} 次）…`
+                  : shell?.trayStatus && !shell.trayStatus.available
+                    ? shell.trayStatus.message ?? '未检测到系统托盘图标'
+                    : '系统托盘运行正常（若资源管理器重启后图标消失，可点击重建）'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void window.api.retryTray()}
+              >
+                重建托盘图标
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => void window.api.quitApp()}
+              >
+                退出应用
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 

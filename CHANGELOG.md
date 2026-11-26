@@ -2,6 +2,13 @@
 
 本文件记录 `ashare-volpulse` 的主要变更历史。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.1.6] - 2026-11-26
+
+### Fixed
+- 加固系统托盘图标构建：移除 `nativeImage.addRepresentation` 中传入 PNG `Buffer` 时的冗余 `width`/`height` 参数，并新增 `isEmpty()` 多级兜底回退（`createFromBuffer` → `createFromDataURL`），防止空图进入缓存（Issue #1）。
+- 加固 Windows 系统托盘生命周期管理：在 `TrayManager` 中增加托盘区域检测（`getBounds`）、有界退避自动重试与交互事件自动转正机制，并保留托盘实例以响应资源管理器重启后的 `TaskbarCreated` 自动恢复。
+- 新增无托盘兜底操作入口：当系统托盘不可用时在 HUD 展示可忽略的提示横幅（提供「重试托盘」「设置」「退出」），并在详情设置页常驻「重建托盘图标」与「退出应用」按钮，避免托盘异常时无法设置或退出程序。
+
 ## [0.1.5] - 2026-11-26
 
 ### Added

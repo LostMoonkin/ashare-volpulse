@@ -309,10 +309,25 @@ export interface BossKeyStatus {
   conflictMessage: string | null;
 }
 
+/** 系统托盘健康状态 */
+export type TrayHealthState = 'ready' | 'retrying' | 'unverified' | 'failed';
+
+/** 系统托盘运行状态（用于无托盘兜底提示与手动重建） */
+export interface TrayStatus {
+  state: TrayHealthState;
+  /** 托盘是否已确认可用（ready 为 true；retrying / unverified / failed 为 false） */
+  available: boolean;
+  /** 已尝试创建/重建次数 */
+  attempts: number;
+  /** 不可用或未检测到时的可读说明（ready 时为 null） */
+  message: string | null;
+}
+
 /** 桌面外壳运行态（同步给 HUD 与详情浮层） */
 export interface DesktopShellState {
   settings: DesktopShellSettings;
   bossKeyStatus: BossKeyStatus;
+  trayStatus: TrayStatus;
   hudVisible: boolean;
   detailVisible: boolean;
   activeDetailSymbol: string;
