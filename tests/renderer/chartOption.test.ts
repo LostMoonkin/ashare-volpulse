@@ -97,4 +97,24 @@ describe('chartOption', () => {
     expect(html).toContain('color:#e6edf3;font-weight:600;">0.00%/分');
     expect(html).not.toContain('#ff7b72');
   });
+
+  it('formats exchange ETF prices with 3 decimal places in tooltip and price axis', () => {
+    const priceSeries = new Array<number | null>(CHART_SLOT_COUNT).fill(null);
+    priceSeries[5] = 0.622;
+    const ds = makeStockDataset({
+      symbol: '588170.SH',
+      name: '科创半导体ETF华夏',
+      priceSeries,
+      priceSeriesName: '分时价格',
+    });
+
+    const option = buildEnergyChartOption(ds) as {
+      tooltip: { formatter: (params: unknown) => string };
+      yAxis: Array<{ axisLabel: { formatter: (v: number) => string } }>;
+    };
+
+    const html = option.tooltip.formatter([{ dataIndex: 5 }]);
+    expect(html).toContain('分时价格：<b>0.622</b>');
+    expect(option.yAxis[1].axisLabel.formatter(0.622)).toBe('0.622');
+  });
 });

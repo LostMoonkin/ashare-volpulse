@@ -254,10 +254,17 @@ export function parseEastmoneySearchResponse(payload: unknown, limit = 10): Tick
     if (seen.has(symbol)) continue;
 
     const typeName = String(row.SecurityTypeName ?? '');
+    const upperTypeName = typeName.toUpperCase();
     const classify = String(row.Classify ?? '');
     const isIndex = classify === 'Index' || typeName.includes('指数');
-    const isStock = classify === 'AStock' || typeName.includes('A') || typeName.includes('股');
-    if (!isIndex && !isStock) continue;
+    const isFund =
+      classify === 'Fund' ||
+      typeName.includes('基金') ||
+      upperTypeName.includes('ETF') ||
+      upperTypeName.includes('LOF');
+    const isStock =
+      !isFund && (classify === 'AStock' || typeName.includes('A') || typeName.includes('股'));
+    if (!isIndex && !isStock && !isFund) continue;
 
     seen.add(symbol);
     results.push({
@@ -265,7 +272,7 @@ export function parseEastmoneySearchResponse(payload: unknown, limit = 10): Tick
       ticker,
       name: String(row.Name ?? '').trim() || symbol,
       exchange,
-      assetType: isIndex ? 'INDEX' : 'STOCK',
+      assetType: isIndex ? 'INDEX' : isFund ? 'FUND' : 'STOCK',
       source: 'eastmoney',
     });
     if (results.length >= limit) break;

@@ -4,6 +4,7 @@ import {
   type ChartAlertMarker,
   type EnergyChartDataset,
 } from '../../../shared/chartData';
+import { isExchangeFundSymbol } from '../../../shared/constants';
 import { formatSignedPct, formatTurnover, getSignedToneColor } from '../utils/format';
 
 export interface AxisUnitScale {
@@ -186,7 +187,8 @@ export function buildEnergyChartOption(dataset: EnergyChartDataset): EChartsCore
           );
         }
         if (priceVal !== null) {
-          lines.push(`<div>${safePriceName}：<b>${priceVal.toFixed(2)}</b></div>`);
+          const priceDigits = isExchangeFundSymbol(dataset.symbol) ? 3 : 2;
+          lines.push(`<div>${safePriceName}：<b>${priceVal.toFixed(priceDigits)}</b></div>`);
         }
         if (slotIndex > 0) {
           lines.push(
@@ -289,7 +291,8 @@ export function buildEnergyChartOption(dataset: EnergyChartDataset): EChartsCore
           color: '#79c0ff',
           fontSize: 10,
           margin: 8,
-          formatter: (val: number) => val.toFixed(val >= 1000 ? 0 : 2),
+          formatter: (val: number) =>
+            val.toFixed(isExchangeFundSymbol(dataset.symbol) ? 3 : val >= 1000 ? 0 : 2),
         },
         splitLine: { show: false },
       },

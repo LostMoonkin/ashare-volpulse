@@ -1,5 +1,5 @@
 import { getShanghaiParts } from '../../core/tradingClock';
-import { MONITORED_INDEX_NAMES } from '../../shared/constants';
+import { isExchangeFundSymbol, MONITORED_INDEX_NAMES } from '../../shared/constants';
 import type {
   IntradayDayData,
   ProviderHealthStatus,
@@ -131,8 +131,15 @@ export function parseHithinkSearchResults(data: unknown, limit = 10): TickerSear
     seen.add(rawCode);
 
     const assetRaw = String(item.asset_type ?? '').toLowerCase();
-    const assetType: 'STOCK' | 'INDEX' =
-      assetRaw.includes('index') || isIndexThscode(rawCode) ? 'INDEX' : 'STOCK';
+    const assetType: 'STOCK' | 'INDEX' | 'FUND' =
+      assetRaw.includes('index') || isIndexThscode(rawCode)
+        ? 'INDEX'
+        : assetRaw.includes('fund') ||
+            assetRaw.includes('etf') ||
+            assetRaw.includes('lof') ||
+            isExchangeFundSymbol(rawCode)
+          ? 'FUND'
+          : 'STOCK';
 
     results.push({
       symbol: rawCode,

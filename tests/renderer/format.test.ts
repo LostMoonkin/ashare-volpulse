@@ -52,6 +52,10 @@ describe('renderer format utils', () => {
 
     expect(formatPrice(3321.46)).toBe('3321.5');
     expect(formatPrice(18.526)).toBe('18.53');
+    expect(formatPrice(18.526, '600519.SH')).toBe('18.53');
+    expect(formatPrice(0.622, '588170.SH')).toBe('0.622');
+    expect(formatPrice(2.196, '159915.SZ')).toBe('2.196');
+    expect(formatPrice(1.45, '161005.SZ')).toBe('1.450');
     expect(formatPrice(0)).toBe('—');
 
     expect(formatSlopeTrend(0, 1.0)).toEqual({

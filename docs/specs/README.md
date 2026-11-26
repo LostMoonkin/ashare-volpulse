@@ -17,3 +17,4 @@
 | 功能 | Spec | 状态 |
 | --- | --- | --- |
 | 桌面悬浮窗极简模式 | [桌面悬浮窗极简模式](hud-minimal-mode.md) | 已确认 |
+| 无 API Key 搜索添加场内 ETF/LOF | [无同花顺 API Key 时支持搜索并添加沪深场内 ETF/LOF](watchlist-etf-search-fallback.md) | 已确认 |

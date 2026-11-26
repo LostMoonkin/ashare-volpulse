@@ -221,7 +221,7 @@ export function HudContent({
                     <div className="hud-quote-name">
                       <span className="quote-title">{item.name}</span>
                     </div>
-                    <span className="hud-quote-price">{formatPrice(price)}</span>
+                    <span className="hud-quote-price">{formatPrice(price, item.symbol)}</span>
                     <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
                     <span className="hud-quote-turn">
                       {turnover !== null ? formatTurnover(turnover) : '降级'}
@@ -393,7 +393,7 @@ export function HudContent({
                       <span className="quote-title">{item.name}</span>
                       {item.scope && <span className="scope-tag">{item.scope}</span>}
                     </div>
-                    <span className="hud-quote-price">{formatPrice(price)}</span>
+                    <span className="hud-quote-price">{formatPrice(price, item.symbol)}</span>
                     <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
                     <span className="hud-quote-turn">
                       {turnover !== null ? formatTurnover(turnover) : '降级'}
@@ -455,7 +455,7 @@ export function HudContent({
                         <span className="quote-title">{item.name}</span>
                         <span className="quote-code">{item.symbol.slice(0, 6)}</span>
                       </div>
-                      <span className="hud-quote-price">{formatPrice(price)}</span>
+                      <span className="hud-quote-price">{formatPrice(price, item.symbol)}</span>
                       <span className={`hud-quote-pct ${toneClass}`}>{formatSignedPct(pct, 2)}</span>
                       <span className="hud-quote-turn">
                         {turnover !== null ? formatTurnover(turnover) : '降级'}

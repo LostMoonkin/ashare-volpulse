@@ -414,7 +414,7 @@ export function DetailView() {
                     )}
                     {currentPrice !== null && (
                       <span style={{ fontSize: '13px', fontWeight: 600 }}>
-                        {formatPrice(currentPrice)}{' '}
+                        {formatPrice(currentPrice, selectedSymbol)}{' '}
                         <span className={getSignedToneClass(currentChangePct)}>
                           {formatSignedPct(currentChangePct, 2)}
                         </span>

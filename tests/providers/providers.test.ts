@@ -189,9 +189,9 @@ describe('TencentProvider parsers & HTTP', () => {
     expect(day.bars[day.bars.length - 1].cumTurnover).toBe(6_214_192_454);
   });
 
-  it('parses smartbox search response and filters to A-share stocks and indices', () => {
+  it('parses smartbox search response and filters to A-share stocks, exchange ETFs/LOFs, and indices while excluding OTC funds', () => {
     const raw =
-      'v_hint="sz~300750~\\u5b81\\u5fb7\\u65f6\\u4ee3~ndsd~GP-A^hk~00700~\\u817e\\u8baf~tx~GP-HK^sh~000001~\\u4e0a\\u8bc1\\u6307\\u6570~szzs~ZS";';
+      'v_hint="sz~300750~\\u5b81\\u5fb7\\u65f6\\u4ee3~ndsd~GP-A^sh~588170~\\u79d1\\u521b\\u534a\\u5bfc\\u4f53ETF\\u534e\\u590f~kcbdtetfhx~ETF^sz~161005~\\u5bcc\\u56fd\\u5929\\u60e0LOF~fgthlof~LOF^jj~110011~\\u6613\\u65b9\\u8fbe\\u4f18\\u8d28~yfd~QDII^hk~00700~\\u817e\\u8baf~tx~GP-HK^sh~000001~\\u4e0a\\u8bc1\\u6307\\u6570~szzs~ZS";';
     const items = parseTencentSearchResponse(raw, 10);
     expect(items).toEqual([
       {
@@ -200,6 +200,22 @@ describe('TencentProvider parsers & HTTP', () => {
         name: '宁德时代',
         exchange: 'SZ',
         assetType: 'STOCK',
+        source: 'tencent',
+      },
+      {
+        symbol: '588170.SH',
+        ticker: '588170',
+        name: '科创半导体ETF华夏',
+        exchange: 'SH',
+        assetType: 'FUND',
+        source: 'tencent',
+      },
+      {
+        symbol: '161005.SZ',
+        ticker: '161005',
+        name: '富国天惠LOF',
+        exchange: 'SZ',
+        assetType: 'FUND',
         source: 'tencent',
       },
       {
@@ -495,24 +511,54 @@ describe('EastmoneyProvider parsers', () => {
     expect(sh.source).toBe('eastmoney');
   });
 
-  it('parses Eastmoney suggest search results accurately', () => {
+  it('parses Eastmoney suggest search results including SH/SZ exchange ETFs and LOFs while excluding OTC funds', () => {
     const payload = {
       QuotationCodeTable: {
         Data: [
           { Code: '600519', Name: '贵州茅台', MktNum: '1', Classify: 'AStock', SecurityTypeName: '沪A' },
+          { Code: '588170', Name: '科创半导体ETF华夏', MktNum: '1', Classify: 'Fund', SecurityTypeName: '基金' },
+          { Code: '159915', Name: '创业板ETF易方达', MktNum: '0', Classify: 'Fund', SecurityTypeName: '基金' },
+          { Code: '161005', Name: '富国天惠LOF', MktNum: '0', Classify: 'Fund', SecurityTypeName: '基金' },
+          { Code: '110011', Name: '易方达优质精选混合', MktNum: '150', Classify: 'OTCFUND', SecurityTypeName: '基金' },
           { Code: '00700', Name: '腾讯控股', MktNum: '116', Classify: 'HK', SecurityTypeName: '港股' },
         ],
       },
     };
     const res = parseEastmoneySearchResponse(payload, 10);
-    expect(res).toHaveLength(1);
-    expect(res[0]).toMatchObject({
-      symbol: '600519.SH',
-      name: '贵州茅台',
-      exchange: 'SH',
-      assetType: 'STOCK',
-      source: 'eastmoney',
-    });
+    expect(res).toEqual([
+      {
+        symbol: '600519.SH',
+        ticker: '600519',
+        name: '贵州茅台',
+        exchange: 'SH',
+        assetType: 'STOCK',
+        source: 'eastmoney',
+      },
+      {
+        symbol: '588170.SH',
+        ticker: '588170',
+        name: '科创半导体ETF华夏',
+        exchange: 'SH',
+        assetType: 'FUND',
+        source: 'eastmoney',
+      },
+      {
+        symbol: '159915.SZ',
+        ticker: '159915',
+        name: '创业板ETF易方达',
+        exchange: 'SZ',
+        assetType: 'FUND',
+        source: 'eastmoney',
+      },
+      {
+        symbol: '161005.SZ',
+        ticker: '161005',
+        name: '富国天惠LOF',
+        exchange: 'SZ',
+        assetType: 'FUND',
+        source: 'eastmoney',
+      },
+    ]);
   });
 
   it('fetches trends2 from push2his host via EastmoneyProvider', async () => {
@@ -675,6 +721,7 @@ describe('HithinkProvider security, parsing & code=4001 backoff', () => {
       {
         item: [
           { thscode: '600519.SH', ticker: '600519', name: '贵州茅台', exchange: 'SH', asset_type: 'stock' },
+          { thscode: '588170.SH', ticker: '588170', name: '科创半导体ETF华夏', exchange: 'SH', asset_type: 'fund' },
           { thscode: '000001.SH', ticker: '000001', name: '上证指数', exchange: 'SH', asset_type: 'index' },
           { thscode: '830799.BJ', ticker: '830799', name: '北证测试', exchange: 'BJ', asset_type: 'stock' },
           { thscode: '600519.SH', ticker: '600519', name: '重复项', exchange: 'SH', asset_type: 'stock' },
@@ -684,6 +731,7 @@ describe('HithinkProvider security, parsing & code=4001 backoff', () => {
     );
     expect(searchItems).toEqual([
       { symbol: '600519.SH', ticker: '600519', name: '贵州茅台', exchange: 'SH', assetType: 'STOCK', source: 'hithink' },
+      { symbol: '588170.SH', ticker: '588170', name: '科创半导体ETF华夏', exchange: 'SH', assetType: 'FUND', source: 'hithink' },
       { symbol: '000001.SH', ticker: '000001', name: '上证指数', exchange: 'SH', assetType: 'INDEX', source: 'hithink' },
     ]);
 

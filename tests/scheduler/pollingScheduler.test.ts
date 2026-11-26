@@ -1745,4 +1745,56 @@ describe('PollingScheduler', () => {
       db.close();
     }
   });
+
+  it('falls back to Eastmoney and Tencent to search exchange ETFs like 588170 when Hithink API key is not configured', async () => {
+    const db = new AppDatabase(':memory:');
+    try {
+      const hithink = createFakeHithink({ configured: false });
+      const hithinkSearchSpy = vi.spyOn(hithink, 'searchTickers');
+      const etfResult = {
+        symbol: '588170.SH',
+        ticker: '588170',
+        name: '科创半导体ETF华夏',
+        exchange: 'SH' as const,
+        assetType: 'FUND' as const,
+        source: 'eastmoney' as const,
+      };
+      const tencentEtfResult = {
+        ...etfResult,
+        source: 'tencent' as const,
+      };
+
+      const eastmoneySearchSpy = vi
+        .fn()
+        .mockResolvedValueOnce([etfResult])
+        .mockRejectedValueOnce(new Error('eastmoney unavailable'));
+      const tencentSearchSpy = vi.fn().mockResolvedValue([tencentEtfResult]);
+
+      const scheduler = new PollingScheduler({
+        database: db,
+        primarySnapshotProvider: createFakeProvider('tencent', {
+          searchTickers: tencentSearchSpy,
+        }),
+        secondarySnapshotProvider: createFakeProvider('sina'),
+        hithinkProvider: hithink,
+        primaryIntradayProvider: createFakeProvider('tencent'),
+        secondaryIntradayProvider: createFakeProvider('eastmoney', {
+          searchTickers: eastmoneySearchSpy,
+        }),
+      });
+
+      // 1. 未配置同花顺 API Key 时跳过同花顺，直接走东财公开源返回 588170.SH
+      const firstRes = await scheduler.searchTickers('588170', 10);
+      expect(hithinkSearchSpy).not.toHaveBeenCalled();
+      expect(eastmoneySearchSpy).toHaveBeenCalledWith('588170', 10);
+      expect(firstRes).toEqual([etfResult]);
+
+      // 2. 东财失败时继续降级至腾讯公开源并返回 588170.SH
+      const secondRes = await scheduler.searchTickers('588170', 10);
+      expect(tencentSearchSpy).toHaveBeenCalledWith('588170', 10);
+      expect(secondRes).toEqual([tencentEtfResult]);
+    } finally {
+      db.close();
+    }
+  });
 });

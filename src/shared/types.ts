@@ -66,7 +66,7 @@ export interface TickerSearchResult {
   ticker: string;
   name: string;
   exchange: 'SH' | 'SZ';
-  assetType: 'STOCK' | 'INDEX';
+  assetType: 'STOCK' | 'INDEX' | 'FUND';
   source: ProviderId;
 }
 

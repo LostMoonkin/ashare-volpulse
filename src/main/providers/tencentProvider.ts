@@ -250,7 +250,12 @@ export function parseTencentSearchResponse(text: string, limit = 10): TickerSear
     if ((market !== 'sh' && market !== 'sz') || !/^\d{6}$/.test(ticker)) continue;
     const isStock = typeTag.includes('GP-A');
     const isIndex = typeTag.includes('ZS');
-    if (!isStock && !isIndex) continue;
+    const isFund =
+      typeTag.includes('ETF') ||
+      typeTag.includes('LOF') ||
+      typeTag.includes('JJ') ||
+      typeTag.includes('FJ');
+    if (!isStock && !isIndex && !isFund) continue;
 
     const exchange = market === 'sh' ? 'SH' : 'SZ';
     const symbol = `${ticker}.${exchange}`;
@@ -262,7 +267,7 @@ export function parseTencentSearchResponse(text: string, limit = 10): TickerSear
       ticker,
       name: name || symbol,
       exchange,
-      assetType: isIndex ? 'INDEX' : 'STOCK',
+      assetType: isIndex ? 'INDEX' : isFund ? 'FUND' : 'STOCK',
       source: 'tencent',
     });
     if (results.length >= limit) break;

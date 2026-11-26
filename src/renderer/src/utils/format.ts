@@ -1,3 +1,4 @@
+import { isExchangeFundSymbol } from '../../../shared/constants';
 import type { MarketPhaseType, VolumeStateType } from '../../../shared/types';
 export {
   resolveSymbolChangePct,
@@ -5,9 +6,15 @@ export {
   resolveSymbolTurnover,
 } from '../../../shared/snapshotView';
 
-export function formatPrice(price: number | null | undefined): string {
+export function formatPrice(
+  price: number | null | undefined,
+  symbol?: string | null
+): string {
   if (price === null || price === undefined || !Number.isFinite(price) || price <= 0) {
     return '—';
+  }
+  if (isExchangeFundSymbol(symbol)) {
+    return price.toFixed(3);
   }
   return price >= 1000 ? price.toFixed(1) : price.toFixed(2);
 }

@@ -197,6 +197,17 @@ export function resolveMonitoredIndexSymbols(
   return result;
 }
 
+/**
+ * 判断标准 thscode 是否为沪深场内基金（ETF / LOF / 封闭式基金等）：
+ * - 沪市：50xxxx / 51xxxx / 52xxxx / 56xxxx / 58xxxx.SH
+ * - 深市：15xxxx / 16xxxx / 18xxxx.SZ
+ */
+export function isExchangeFundSymbol(symbol: string | null | undefined): boolean {
+  if (!symbol) return false;
+  const upper = symbol.trim().toUpperCase();
+  return /^(50|51|52|56|58)\d{4}\.SH$/.test(upper) || /^(15|16|18)\d{4}\.SZ$/.test(upper);
+}
+
 /** 盘中轮询频率与退避预算（依据 Phase 0 压测结论） */
 export const DEFAULT_POLLING_INTERVAL_SEC = 3;
 export const MIN_POLLING_INTERVAL_SEC = 3;

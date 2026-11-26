@@ -95,4 +95,16 @@ describe('WatchlistService', () => {
       expect(() => service.add({ symbol: idx, name: '扩展指数' })).toThrow(/指数展示配置/);
     }
   });
+
+  it('supports adding SH/SZ exchange ETFs and LOFs such as 588170.SH and 159915.SZ', () => {
+    const db = createMemoryDb();
+    const service = new WatchlistService(db);
+
+    service.add({ symbol: '588170.SH', name: '科创半导体ETF华夏' });
+    const rows = service.add({ symbol: '159915.sz', name: '创业板ETF易方达' });
+    expect(rows.map((r) => [r.symbol, r.name])).toEqual([
+      ['588170.SH', '科创半导体ETF华夏'],
+      ['159915.SZ', '创业板ETF易方达'],
+    ]);
+  });
 });

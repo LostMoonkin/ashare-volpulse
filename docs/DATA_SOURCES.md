@@ -144,7 +144,7 @@
 
 #### D. 标的搜索兜底
 - **URL**：`https://smartbox.gtimg.cn/s3/?v=2&q=<encodeURIComponent(keyword)>&t=all`
-- **编码**：GB18030，响应形如 `v_hint="sz~300750~\u5b81\u5fb7\u65f6\u4ee3~ndsd~GP-A^..."`，以 `^` 分条、`~` 分字段，过滤 `market in ('sh','sz')` 且类型含 `GP-A`（A股）或 `ZS`（指数）。实测延迟 **149ms**。
+- **编码**：GB18030，响应形如 `v_hint="sz~300750~\u5b81\u5fb7\u65f6\u4ee3~ndsd~GP-A^..."` 或 `v_hint="sh~588170~\u79d1\u521b\u534a\u5bfc\u4f53ETF\u534e\u590f~kcbdtetfhx~ETF"`，以 `^` 分条、`~` 分字段，过滤 `market in ('sh','sz')` 且类型含 `GP-A`（A股）、`ZS`（指数）或 `ETF` / `LOF` / `JJ` / `FJ`（沪深场内基金；场外基金前缀为 `jj`，自动排除）。实测延迟 **149ms**。
 
 ---
 
@@ -198,7 +198,7 @@
 
 #### C. 搜索联想兜底
 - **URL**：`https://searchapi.eastmoney.com/api/suggest/get?input=<encodeURIComponent(keyword)>&type=14&count=10`
-- **实测表现**：延迟 **77ms**，返回 JSON `QuotationCodeTable.Data[]`，过滤 `MktNum in ('0','1')`（沪深 A 股/指数），映射为 `${Code}.${MktNum === '1' ? 'SH' : 'SZ'}`。
+- **实测表现**：延迟 **77ms**，返回 JSON `QuotationCodeTable.Data[]`，过滤 `MktNum in ('0','1')` 且为沪深 A 股、指数或场内基金（`Classify === 'Fund'` / `SecurityTypeName` 含基金/ETF/LOF；场外基金为 `MktNum === '150'` / `Classify === 'OTCFUND'`，自动排除），映射为 `${Code}.${MktNum === '1' ? 'SH' : 'SZ'}`。
 
 ---
 

@@ -78,6 +78,7 @@ export function WatchlistPanel({
 }: WatchlistPanelProps) {
   const [keyword, setKeyword] = useState('');
   const [searching, setSearching] = useState(false);
+  const [searchedKeyword, setSearchedKeyword] = useState('');
   const [results, setResults] = useState<TickerSearchResult[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [draggingSymbol, setDraggingSymbol] = useState<string | null>(null);
@@ -120,6 +121,7 @@ export function WatchlistPanel({
 
     if (!trimmed) {
       setResults([]);
+      setSearchedKeyword('');
       setSearching(false);
       return;
     }
@@ -132,9 +134,12 @@ export function WatchlistPanel({
         .then((list) => {
           if (reqId !== searchReqIdRef.current) return;
           setResults(list);
+          setSearchedKeyword(trimmed);
         })
         .catch((err: unknown) => {
           if (reqId !== searchReqIdRef.current) return;
+          setResults([]);
+          setSearchedKeyword(trimmed);
           setErrorMsg(err instanceof Error ? err.message : String(err));
         })
         .finally(() => {
@@ -295,7 +300,7 @@ export function WatchlistPanel({
       {/* 搜索添加区 */}
       <section className="panel-card">
         <h2 className="panel-title">
-          <span>搜索并添加自选股（同花顺优先，公开源兜底）</span>
+          <span>搜索并添加自选股 / 场内 ETF（同花顺优先，公开源兜底）</span>
           <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>
             支持 6 位代码或中文简称
           </span>
@@ -307,7 +312,7 @@ export function WatchlistPanel({
             style={{ flex: 1 }}
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder="输入代码或名称，例如 600519、宁德时代、中芯国际…"
+            placeholder="输入代码或名称，例如 600519、588170、宁德时代、科创半导体ETF…"
           />
           {keyword && (
             <button type="button" className="btn" onClick={() => setKeyword('')}>
@@ -328,6 +333,12 @@ export function WatchlistPanel({
           </div>
         )}
 
+        {!searching && !errorMsg && searchedKeyword === keyword.trim() && searchedKeyword && results.length === 0 && (
+          <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+            未找到匹配的沪深股票、场内 ETF/LOF 或指数
+          </div>
+        )}
+
         {!searching && results.length > 0 && (
           <div className="search-result-list">
             {results.map((item) => {
@@ -340,6 +351,7 @@ export function WatchlistPanel({
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <strong>{item.name}</strong>
                     <span className="muted-mono">{item.symbol}</span>
+                    {item.assetType === 'FUND' && <span className="scope-tag">场内基金</span>}
                     <span className="scope-tag">{formatSourceLabel(item.source)}</span>
                   </div>
                   <button
@@ -406,7 +418,7 @@ export function WatchlistPanel({
                     <span className="muted-mono">{row.symbol}</span>
                   </div>
                   <div className="wl-col-quote">
-                    <span>{formatPrice(price)}</span>
+                    <span>{formatPrice(price, row.symbol)}</span>
                     <span className={toneClass}>{formatSignedPct(pct, 2)}</span>
                     <span style={{ color: 'var(--text-secondary)' }}>
                       {turnover !== null ? formatTurnover(turnover) : '待拉取/降级'}
