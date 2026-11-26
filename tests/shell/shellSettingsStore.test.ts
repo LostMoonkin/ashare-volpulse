@@ -23,6 +23,7 @@ describe('ShellSettingsStore', () => {
 
     expect(store.load()).toEqual({
       hudPosition: null,
+      hudSize: null,
       hudOpacity: 0.9,
       alwaysOnTop: true,
       muted: false,
@@ -32,11 +33,12 @@ describe('ShellSettingsStore', () => {
     });
   });
 
-  it('persists HUD position, clamped opacity, alwaysOnTop, muted, bossKey, autoLaunch, and hudMode', () => {
+  it('persists HUD position, clamped standard size, opacity, alwaysOnTop, muted, bossKey, autoLaunch, and hudMode', () => {
     const db = createMemoryDb();
     const store = new ShellSettingsStore(db);
 
     expect(store.setHudPosition({ x: 1200.4, y: 48.6 })).toEqual({ x: 1200, y: 49 });
+    expect(store.setHudSize({ width: 512.4, height: 619.6 })).toEqual({ width: 512, height: 620 });
     expect(store.setHudOpacity(0.15)).toBe(0.3);
     expect(store.setAlwaysOnTop(false)).toBe(false);
     expect(store.setMuted(true)).toBe(true);
@@ -48,6 +50,7 @@ describe('ShellSettingsStore', () => {
     const reloaded = new ShellSettingsStore(db).load();
     expect(reloaded).toEqual({
       hudPosition: { x: 1200, y: 49 },
+      hudSize: { width: 512, height: 620 },
       hudOpacity: 0.3,
       alwaysOnTop: false,
       muted: true,
@@ -55,6 +58,10 @@ describe('ShellSettingsStore', () => {
       autoLaunch: true,
       hudMode: 'minimal',
     });
+
+    // 超界尺寸写入自动钳制到 [MIN, MAX]
+    expect(store.setHudSize({ width: 120, height: 1800 })).toEqual({ width: 340, height: 960 });
+    expect(new ShellSettingsStore(db).load().hudSize).toEqual({ width: 340, height: 960 });
 
     // 非法值和切回标准模式均正常落盘并回退默认值
     expect(store.setHudMode('unknown' as unknown as 'standard')).toBe('standard');

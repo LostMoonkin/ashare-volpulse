@@ -12,6 +12,8 @@ interface MockBrowserWindowInstance {
   bounds: MockBounds;
   minWidth: number;
   minHeight: number;
+  maxWidth: number;
+  maxHeight: number;
   resizable: boolean;
   resizeSequence: string[];
   visible: boolean;
@@ -74,6 +76,8 @@ vi.mock('electron', () => ({
       },
       minWidth: Number(opts.minWidth ?? 0),
       minHeight: Number(opts.minHeight ?? 0),
+      maxWidth: Number(opts.maxWidth ?? 0),
+      maxHeight: Number(opts.maxHeight ?? 0),
       resizable: opts.resizable !== false,
       resizeSequence: [],
       visible: Boolean(opts.show),
@@ -126,6 +130,11 @@ vi.mock('electron', () => ({
         instance.minHeight = height;
         instance.resizeSequence.push(`minSize:${width}x${height}`);
       }),
+      setMaximumSize: vi.fn((width: number, height: number) => {
+        instance.maxWidth = width;
+        instance.maxHeight = height;
+        instance.resizeSequence.push(`maxSize:${width}x${height}`);
+      }),
       setBounds: vi.fn((b: MockBounds) => {
         instance.bounds = { ...b };
         instance.resizeSequence.push(`bounds:${b.width}x${b.height}`);
@@ -166,14 +175,19 @@ import { WindowManager } from '../../src/main/windows/windowManager';
 import {
   HUD_DEFAULT_HEIGHT,
   HUD_DEFAULT_WIDTH,
+  HUD_MAX_HEIGHT,
+  HUD_MAX_WIDTH,
   HUD_MINIMAL_HEIGHT,
   HUD_MINIMAL_WIDTH,
+  HUD_MIN_HEIGHT,
+  HUD_MIN_WIDTH,
 } from '../../src/shared/constants';
 import type { DesktopShellSettings } from '../../src/shared/types';
 
 function makeSettings(overrides?: Partial<DesktopShellSettings>): DesktopShellSettings {
   return {
     hudPosition: null,
+    hudSize: null,
     hudOpacity: 0.85,
     alwaysOnTop: true,
     muted: false,
@@ -364,8 +378,10 @@ describe('WindowManager', () => {
     expect(initialMinimalHud.bounds.height).toBe(HUD_MINIMAL_HEIGHT);
     expect(initialMinimalHud.minWidth).toBe(HUD_MINIMAL_WIDTH);
     expect(initialMinimalHud.minHeight).toBe(HUD_MINIMAL_HEIGHT);
+    expect(initialMinimalHud.resizable).toBe(false);
 
     // 标准窗口在右上角动态切换极简与标准模式
+    const onSizeCommitted = vi.fn();
     const wm = new WindowManager({
       preloadPath: '/preload.js',
       rendererHtmlPath: '/index.html',
@@ -374,10 +390,16 @@ describe('WindowManager', () => {
         hudPosition: { x: 1500, y: 20 },
       }),
       onHudPositionCommitted: onPositionCommitted,
+      onHudSizeCommitted: onSizeCommitted,
       onStateChanged: vi.fn(),
     });
     wm.createHudWindow();
     const hud = mockWindows[1];
+    expect(hud.resizable).toBe(true);
+    expect(hud.minWidth).toBe(HUD_MIN_WIDTH);
+    expect(hud.minHeight).toBe(HUD_MIN_HEIGHT);
+    expect(hud.maxWidth).toBe(HUD_MAX_WIDTH);
+    expect(hud.maxHeight).toBe(HUD_MAX_HEIGHT);
     expect(hud.bounds).toEqual({
       x: 1500,
       y: 20,
@@ -390,6 +412,7 @@ describe('WindowManager', () => {
       'resizable:true',
       `minSize:${HUD_MINIMAL_WIDTH}x${HUD_MINIMAL_HEIGHT}`,
       `bounds:${HUD_MINIMAL_WIDTH}x${HUD_MINIMAL_HEIGHT}`,
+      `maxSize:${HUD_MINIMAL_WIDTH}x${HUD_MINIMAL_HEIGHT}`,
       'resizable:false',
     ]);
     expect(hud.resizable).toBe(false);
@@ -405,9 +428,12 @@ describe('WindowManager', () => {
       x: 1500 + HUD_DEFAULT_WIDTH - HUD_MINIMAL_WIDTH,
       y: 20,
     });
+    // 切换极简模式不得覆盖标准模式自定义尺寸
+    expect(onSizeCommitted).not.toHaveBeenCalled();
 
     hud.resizeSequence.length = 0;
     wm.applyHudMode('standard');
+    expect(hud.resizable).toBe(true);
     expect(hud.bounds).toEqual({
       x: 1500,
       y: 20,
@@ -416,9 +442,86 @@ describe('WindowManager', () => {
     });
     expect(hud.resizeSequence).toEqual([
       'resizable:true',
-      `minSize:${HUD_DEFAULT_WIDTH}x${HUD_DEFAULT_HEIGHT}`,
+      `maxSize:${HUD_MAX_WIDTH}x${HUD_MAX_HEIGHT}`,
+      `minSize:${HUD_MIN_WIDTH}x${HUD_MIN_HEIGHT}`,
       `bounds:${HUD_DEFAULT_WIDTH}x${HUD_DEFAULT_HEIGHT}`,
-      'resizable:false',
     ]);
+  });
+
+  it('persists debounced standard-mode resize (including left/top edge position shift) and restores custom size across minimal roundtrip and restart', () => {
+    vi.useFakeTimers();
+    const onPositionCommitted = vi.fn();
+    const onSizeCommitted = vi.fn();
+
+    const wm = new WindowManager({
+      preloadPath: '/preload.js',
+      rendererHtmlPath: '/index.html',
+      initialSettings: makeSettings({
+        hudMode: 'standard',
+        hudPosition: { x: 1400, y: 40 },
+      }),
+      onHudPositionCommitted: onPositionCommitted,
+      onHudSizeCommitted: onSizeCommitted,
+      onStateChanged: vi.fn(),
+    });
+
+    wm.createHudWindow();
+    const hud = mockWindows[0];
+
+    // 模拟用户拖左边缘与底边缘缩放：x 左移 80px，宽增至 480，高增至 620
+    hud.bounds = { x: 1320, y: 40, width: 480, height: 620 };
+    hud.emitWindowEvent('resized');
+    expect(onSizeCommitted).not.toHaveBeenCalled();
+
+    // 未满 200ms 即切换极简模式：必须先刷盘标准模式自定义尺寸，再缩小为极简锁定尺寸
+    wm.applyHudMode('minimal');
+    expect(onSizeCommitted).toHaveBeenCalledTimes(1);
+    expect(onSizeCommitted).toHaveBeenLastCalledWith({ width: 480, height: 620 });
+    expect(hud.resizable).toBe(false);
+    expect(hud.bounds).toEqual({
+      x: 1320 + 480 - HUD_MINIMAL_WIDTH,
+      y: 40,
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+
+    // 极简模式下若收到意外 resized 事件，绝不污染标准模式尺寸
+    onSizeCommitted.mockClear();
+    hud.emitWindowEvent('resized');
+    vi.advanceTimersByTime(500);
+    expect(onSizeCommitted).not.toHaveBeenCalled();
+
+    // 切回标准模式：恢复 480×620 自定义尺寸，右边缘对齐回 x=1320，且重新允许缩放
+    wm.applyHudMode('standard');
+    expect(hud.resizable).toBe(true);
+    expect(hud.bounds).toEqual({
+      x: 1320,
+      y: 40,
+      width: 480,
+      height: 620,
+    });
+
+    // 模拟重启后从持久化的 hudSize 恢复
+    const wmRestart = new WindowManager({
+      preloadPath: '/preload.js',
+      rendererHtmlPath: '/index.html',
+      initialSettings: makeSettings({
+        hudMode: 'standard',
+        hudPosition: { x: 1320, y: 40 },
+        hudSize: { width: 480, height: 620 },
+      }),
+      onHudPositionCommitted: vi.fn(),
+      onHudSizeCommitted: vi.fn(),
+      onStateChanged: vi.fn(),
+    });
+    wmRestart.createHudWindow();
+    const restartedHud = mockWindows[1];
+    expect(restartedHud.resizable).toBe(true);
+    expect(restartedHud.bounds).toEqual({
+      x: 1320,
+      y: 40,
+      width: 480,
+      height: 620,
+    });
   });
 });

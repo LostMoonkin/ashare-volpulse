@@ -247,6 +247,7 @@ export const APP_USER_MODEL_ID = 'com.asharevolpulse.app';
 
 /** 桌面外壳持久化设置键（存入 SQLite app_settings） */
 export const SETTING_HUD_POSITION = 'shell.hudPosition';
+export const SETTING_HUD_SIZE = 'shell.hudSize';
 export const SETTING_HUD_OPACITY = 'shell.hudOpacity';
 export const SETTING_ALWAYS_ON_TOP = 'shell.alwaysOnTop';
 export const SETTING_MUTED = 'shell.muted';
@@ -266,9 +267,13 @@ export const DEFAULT_BOSS_KEY = 'Alt+Shift+A';
 export const DEFAULT_HUD_MODE = 'standard' as const;
 export const HUD_MINIMAL_WATCHLIST_LIMIT = 3;
 
-/** 双态窗口默认尺寸（像素） */
+/** 双态窗口默认尺寸与缩放边界（像素） */
 export const HUD_DEFAULT_WIDTH = 400;
 export const HUD_DEFAULT_HEIGHT = 456;
+export const HUD_MIN_WIDTH = 340;
+export const HUD_MIN_HEIGHT = 360;
+export const HUD_MAX_WIDTH = 720;
+export const HUD_MAX_HEIGHT = 960;
 export const HUD_MINIMAL_WIDTH = 320;
 export const HUD_MINIMAL_HEIGHT = 212;
 export const DETAIL_DEFAULT_WIDTH = 960;

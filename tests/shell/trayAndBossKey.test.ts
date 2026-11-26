@@ -223,6 +223,7 @@ describe('TrayManager', () => {
     return {
       settings: {
         hudPosition: null,
+        hudSize: null,
         hudOpacity: 0.9,
         alwaysOnTop: true,
         muted: false,
@@ -308,6 +309,7 @@ describe('TrayManager', () => {
         detailVisible: true,
         settings: {
           hudPosition: null,
+          hudSize: null,
           hudOpacity: 0.9,
           alwaysOnTop: true,
           muted: false,

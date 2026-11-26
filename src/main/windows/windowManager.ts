@@ -13,11 +13,15 @@ import type {
   HudMode,
   OpenDetailOptions,
   WindowPosition,
+  WindowSize,
 } from '../../shared/types';
 import {
   clampHudOpacity,
+  clampHudStandardSize,
   computeDetailOverlayBounds,
   computeResizedHudBounds,
+  getHudMaxSizeForMode,
+  getHudMinSizeForMode,
   getHudSizeForMode,
   isRectSufficientlyVisible,
   resolveHudBounds,
@@ -77,6 +81,7 @@ export interface WindowManagerOptions {
   rendererDevUrl?: string;
   initialSettings: DesktopShellSettings;
   onHudPositionCommitted: (position: WindowPosition) => void;
+  onHudSizeCommitted?: (size: WindowSize) => void;
   onStateChanged: () => void;
   onWindowReady?: (win: BrowserWindow, view: 'hud' | 'detail') => void;
 }
@@ -102,8 +107,10 @@ export class WindowManager {
   private detailDesiredVisible = false;
   private detailEscapeSuppressed = false;
   private suppressStateEvents = false;
+  private isApplyingModeBounds = false;
   private isQuitting = false;
   private moveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private resizeSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: WindowManagerOptions) {
     this.options = options;
@@ -112,6 +119,7 @@ export class WindowManager {
 
   prepareForQuit(): void {
     this.isQuitting = true;
+    this.flushPendingResizeSave();
     this.flushPendingMoveSave();
   }
 
@@ -183,14 +191,21 @@ export class WindowManager {
   private ensureHudInVisibleWorkArea(win: BrowserWindow): void {
     const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
     const current = win.getBounds();
-    const modeSize = getHudSizeForMode(this.settings.hudMode);
+    const modeSize = getHudSizeForMode(this.settings.hudMode, this.settings.hudSize);
     const safeBounds = resolveHudBounds(
       { x: current.x, y: current.y },
       { width: current.width || modeSize.width, height: current.height || modeSize.height },
       workAreas,
       primaryWorkArea
     );
-    if (safeBounds.x !== current.x || safeBounds.y !== current.y) {
+    if (safeBounds.width !== current.width || safeBounds.height !== current.height) {
+      this.isApplyingModeBounds = true;
+      try {
+        win.setBounds(safeBounds);
+      } finally {
+        this.isApplyingModeBounds = false;
+      }
+    } else if (safeBounds.x !== current.x || safeBounds.y !== current.y) {
       win.setPosition(safeBounds.x, safeBounds.y);
     }
   }
@@ -233,13 +248,18 @@ export class WindowManager {
     }
 
     const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
-    const hudSize = getHudSizeForMode(this.settings.hudMode);
+    const isMinimal = this.settings.hudMode === 'minimal';
+    const hudSize = getHudSizeForMode(this.settings.hudMode, this.settings.hudSize);
+    const minSize = getHudMinSizeForMode(this.settings.hudMode);
+    const maxSize = getHudMaxSizeForMode(this.settings.hudMode);
     const bounds = resolveHudBounds(
       this.settings.hudPosition,
       hudSize,
       workAreas,
       primaryWorkArea
     );
+    const effectiveMinWidth = Math.min(minSize.width, bounds.width);
+    const effectiveMinHeight = Math.min(minSize.height, bounds.height);
 
     this.hudReady = false;
     this.hudDesiredVisible = true;
@@ -249,13 +269,15 @@ export class WindowManager {
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
-      minWidth: bounds.width,
-      minHeight: bounds.height,
+      minWidth: effectiveMinWidth,
+      minHeight: effectiveMinHeight,
+      maxWidth: maxSize.width,
+      maxHeight: maxSize.height,
       frame: false,
       transparent: true,
       backgroundColor: '#00000000',
       hasShadow: false,
-      resizable: false,
+      resizable: !isMinimal,
       maximizable: false,
       minimizable: false,
       fullscreenable: false,
@@ -305,8 +327,14 @@ export class WindowManager {
     });
 
     win.on('moved', () => {
-      if (win.isDestroyed()) return;
+      if (win.isDestroyed() || this.isApplyingModeBounds) return;
       this.scheduleMoveSave();
+    });
+
+    win.on('resized', () => {
+      if (win.isDestroyed() || this.isApplyingModeBounds) return;
+      if (this.settings.hudMode !== 'standard') return;
+      this.scheduleResizeSave();
     });
 
     win.on('show', () => this.emitStateChanged());
@@ -589,15 +617,23 @@ export class WindowManager {
     return normalized;
   }
 
-  /** 切换 HUD 标准/极简模式并按锚点同步缩放窗体物理尺寸 */
+  /** 切换 HUD 标准/极简模式并按锚点同步缩放窗体物理尺寸（仅标准模式允许自由缩放） */
   applyHudMode(mode: HudMode): HudMode {
     const normalized: HudMode = mode === 'minimal' ? 'minimal' : 'standard';
+
+    // 从标准模式切出前先刷盘刚结束拖拽的自定义尺寸，防止 200ms 防抖未触发而丢失
+    if (this.settings.hudMode === 'standard' && normalized !== 'standard') {
+      this.flushPendingResizeSave();
+    }
+
     this.settings = { ...this.settings, hudMode: normalized };
 
     if (this.hudWindow && !this.hudWindow.isDestroyed()) {
       const win = this.hudWindow;
       const current = win.getBounds();
-      const nextSize = getHudSizeForMode(normalized);
+      const nextSize = getHudSizeForMode(normalized, this.settings.hudSize);
+      const minSize = getHudMinSizeForMode(normalized);
+      const maxSize = getHudMaxSizeForMode(normalized);
       const { workAreas, primaryWorkArea } = this.getDisplayMetrics();
       const nextBounds = computeResizedHudBounds(current, nextSize, workAreas, primaryWorkArea);
 
@@ -605,12 +641,35 @@ export class WindowManager {
         clearTimeout(this.moveSaveTimer);
         this.moveSaveTimer = null;
       }
+      if (this.resizeSaveTimer) {
+        clearTimeout(this.resizeSaveTimer);
+        this.resizeSaveTimer = null;
+      }
 
-      // Windows 下 resizable: false 窗口需临时放开 resizable 并更新 minSize 才能可靠缩小
-      win.setResizable(true);
-      win.setMinimumSize(nextBounds.width, nextBounds.height);
-      win.setBounds(nextBounds);
-      win.setResizable(false);
+      this.isApplyingModeBounds = true;
+      try {
+        // Windows 下 resizable: false 窗口需先放开 resizable 再调整 min/max 与 bounds
+        win.setResizable(true);
+        if (normalized === 'minimal') {
+          win.setMinimumSize(minSize.width, minSize.height);
+          win.setBounds(nextBounds);
+          if (typeof win.setMaximumSize === 'function') {
+            win.setMaximumSize(maxSize.width, maxSize.height);
+          }
+          win.setResizable(false);
+        } else {
+          if (typeof win.setMaximumSize === 'function') {
+            win.setMaximumSize(maxSize.width, maxSize.height);
+          }
+          win.setMinimumSize(
+            Math.min(minSize.width, nextBounds.width),
+            Math.min(minSize.height, nextBounds.height)
+          );
+          win.setBounds(nextBounds);
+        }
+      } finally {
+        this.isApplyingModeBounds = false;
+      }
 
       if (nextBounds.x !== current.x || nextBounds.y !== current.y) {
         const pos: WindowPosition = { x: nextBounds.x, y: nextBounds.y };
@@ -648,12 +707,51 @@ export class WindowManager {
     }
   }
 
+  private scheduleResizeSave(): void {
+    if (this.resizeSaveTimer) {
+      clearTimeout(this.resizeSaveTimer);
+    }
+    this.resizeSaveTimer = setTimeout(() => {
+      this.resizeSaveTimer = null;
+      this.commitCurrentHudSizeAndPosition();
+    }, 200);
+  }
+
+  private flushPendingResizeSave(): void {
+    if (this.resizeSaveTimer) {
+      clearTimeout(this.resizeSaveTimer);
+      this.resizeSaveTimer = null;
+      this.commitCurrentHudSizeAndPosition();
+    }
+  }
+
   private commitCurrentHudPosition(): void {
     if (!this.hudWindow || this.hudWindow.isDestroyed()) return;
     const [x, y] = this.hudWindow.getPosition();
     const pos: WindowPosition = { x, y };
     this.settings = { ...this.settings, hudPosition: pos };
     this.options.onHudPositionCommitted(pos);
+  }
+
+  private commitCurrentHudSizeAndPosition(): void {
+    if (!this.hudWindow || this.hudWindow.isDestroyed()) return;
+    if (this.settings.hudMode !== 'standard') return;
+    const bounds = this.hudWindow.getBounds();
+    const size = clampHudStandardSize({ width: bounds.width, height: bounds.height });
+    this.settings = { ...this.settings, hudSize: size };
+    this.options.onHudSizeCommitted?.(size);
+
+    // 拖拽左边缘/上边缘缩放时窗口左上角坐标会同步变化，一并提交并取消冗余 move 防抖
+    if (this.moveSaveTimer) {
+      clearTimeout(this.moveSaveTimer);
+      this.moveSaveTimer = null;
+    }
+    const prevPos = this.settings.hudPosition;
+    if (!prevPos || prevPos.x !== bounds.x || prevPos.y !== bounds.y) {
+      const pos: WindowPosition = { x: bounds.x, y: bounds.y };
+      this.settings = { ...this.settings, hudPosition: pos };
+      this.options.onHudPositionCommitted(pos);
+    }
   }
 
   destroyAll(): void {

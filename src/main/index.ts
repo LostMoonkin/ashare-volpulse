@@ -563,6 +563,12 @@ function initServices(): void {
       shellSettings = { ...shellSettings, hudPosition: saved };
       syncShellState();
     },
+    onHudSizeCommitted: (size) => {
+      if (!settingsStore || !shellSettings) return;
+      const saved = settingsStore.setHudSize(size);
+      shellSettings = { ...shellSettings, hudSize: saved };
+      syncShellState();
+    },
     onStateChanged: () => {
       if (shellSettings && windowManager && bossKeyManager) {
         syncShellState();

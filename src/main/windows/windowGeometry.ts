@@ -2,12 +2,16 @@ import {
   DEFAULT_HUD_OPACITY,
   HUD_DEFAULT_HEIGHT,
   HUD_DEFAULT_WIDTH,
+  HUD_MAX_HEIGHT,
+  HUD_MAX_WIDTH,
   HUD_MINIMAL_HEIGHT,
   HUD_MINIMAL_WIDTH,
+  HUD_MIN_HEIGHT,
+  HUD_MIN_WIDTH,
   MAX_HUD_OPACITY,
   MIN_HUD_OPACITY,
 } from '../../shared/constants';
-import type { HudMode, WindowPosition } from '../../shared/types';
+import type { HudMode, WindowPosition, WindowSize } from '../../shared/types';
 
 export interface Rect {
   x: number;
@@ -21,11 +25,50 @@ export interface Size {
   height: number;
 }
 
-/** 按展示模式返回 HUD 窗口目标尺寸 */
-export function getHudSizeForMode(mode: HudMode): Size {
+/** 将标准模式 HUD 尺寸钳制在 [MIN, MAX]（及可选目标工作区宽高）内，非法或空值回退默认尺寸 */
+export function clampHudStandardSize(
+  size: Size | WindowSize | null | undefined,
+  workArea?: Rect
+): Size {
+  const rawW =
+    size && typeof size.width === 'number' && Number.isFinite(size.width) && size.width > 0
+      ? size.width
+      : HUD_DEFAULT_WIDTH;
+  const rawH =
+    size && typeof size.height === 'number' && Number.isFinite(size.height) && size.height > 0
+      ? size.height
+      : HUD_DEFAULT_HEIGHT;
+
+  const maxW = workArea ? Math.min(HUD_MAX_WIDTH, Math.max(1, Math.round(workArea.width))) : HUD_MAX_WIDTH;
+  const maxH = workArea ? Math.min(HUD_MAX_HEIGHT, Math.max(1, Math.round(workArea.height))) : HUD_MAX_HEIGHT;
+  const minW = Math.min(HUD_MIN_WIDTH, maxW);
+  const minH = Math.min(HUD_MIN_HEIGHT, maxH);
+
+  return {
+    width: Math.round(clamp(rawW, minW, maxW)),
+    height: Math.round(clamp(rawH, minH, maxH)),
+  };
+}
+
+/** 按展示模式返回 HUD 窗口目标尺寸（极简模式固定紧凑尺寸，标准模式恢复已保存尺寸并钳制） */
+export function getHudSizeForMode(mode: HudMode, savedStandardSize?: Size | null): Size {
   return mode === 'minimal'
     ? { width: HUD_MINIMAL_WIDTH, height: HUD_MINIMAL_HEIGHT }
-    : { width: HUD_DEFAULT_WIDTH, height: HUD_DEFAULT_HEIGHT };
+    : clampHudStandardSize(savedStandardSize);
+}
+
+/** 按展示模式返回 HUD 窗口最小允许尺寸 */
+export function getHudMinSizeForMode(mode: HudMode): Size {
+  return mode === 'minimal'
+    ? { width: HUD_MINIMAL_WIDTH, height: HUD_MINIMAL_HEIGHT }
+    : { width: HUD_MIN_WIDTH, height: HUD_MIN_HEIGHT };
+}
+
+/** 按展示模式返回 HUD 窗口最大允许尺寸 */
+export function getHudMaxSizeForMode(mode: HudMode): Size {
+  return mode === 'minimal'
+    ? { width: HUD_MINIMAL_WIDTH, height: HUD_MINIMAL_HEIGHT }
+    : { width: HUD_MAX_WIDTH, height: HUD_MAX_HEIGHT };
 }
 
 /** 将 HUD 透明度钳制在 [0.3, 1.0]，非法值回退默认值 */
@@ -113,22 +156,45 @@ export function resolveHudBounds(
     Number.isFinite(savedPosition.x) &&
     Number.isFinite(savedPosition.y)
   ) {
-    const candidate: Rect = {
+    const rawCandidate: Rect = {
       x: Math.round(savedPosition.x),
       y: Math.round(savedPosition.y),
-      width: hudSize.width,
-      height: hudSize.height,
+      width: Math.round(hudSize.width),
+      height: Math.round(hudSize.height),
+    };
+
+    const targetWa = findTargetWorkArea(rawCandidate, areas, primaryWorkArea);
+    const fitWidth = Math.min(rawCandidate.width, Math.max(1, Math.round(targetWa.width)));
+    const fitHeight = Math.min(rawCandidate.height, Math.max(1, Math.round(targetWa.height)));
+    const candidate: Rect = {
+      x: rawCandidate.x,
+      y: rawCandidate.y,
+      width: fitWidth,
+      height: fitHeight,
     };
 
     if (isRectSufficientlyVisible(candidate, areas)) {
-      return candidate;
+      const clampedX =
+        candidate.width < rawCandidate.width
+          ? Math.round(clamp(candidate.x, targetWa.x, targetWa.x + Math.max(0, targetWa.width - candidate.width)))
+          : candidate.x;
+      const clampedY =
+        candidate.height < rawCandidate.height
+          ? Math.round(clamp(candidate.y, targetWa.y, targetWa.y + Math.max(0, targetWa.height - candidate.height)))
+          : candidate.y;
+      return {
+        x: clampedX,
+        y: clampedY,
+        width: candidate.width,
+        height: candidate.height,
+      };
     }
 
     // 寻找重叠最多的显示器；若完全无重叠（例如拔掉了外接副屏），重置回主屏默认位置
     let bestArea: Rect | null = null;
     let bestOverlap = 0;
     for (const wa of areas) {
-      const area = intersectionArea(candidate, wa);
+      const area = intersectionArea(rawCandidate, wa);
       if (area > bestOverlap) {
         bestOverlap = area;
         bestArea = wa;
@@ -136,23 +202,29 @@ export function resolveHudBounds(
     }
 
     if (bestArea) {
-      const maxX = bestArea.x + Math.max(0, bestArea.width - hudSize.width);
-      const maxY = bestArea.y + Math.max(0, bestArea.height - hudSize.height);
+      const safeW = Math.min(rawCandidate.width, Math.max(1, Math.round(bestArea.width)));
+      const safeH = Math.min(rawCandidate.height, Math.max(1, Math.round(bestArea.height)));
+      const maxX = bestArea.x + Math.max(0, bestArea.width - safeW);
+      const maxY = bestArea.y + Math.max(0, bestArea.height - safeH);
       return {
-        x: Math.round(clamp(candidate.x, bestArea.x, maxX)),
-        y: Math.round(clamp(candidate.y, bestArea.y, maxY)),
-        width: hudSize.width,
-        height: hudSize.height,
+        x: Math.round(clamp(rawCandidate.x, bestArea.x, maxX)),
+        y: Math.round(clamp(rawCandidate.y, bestArea.y, maxY)),
+        width: safeW,
+        height: safeH,
       };
     }
   }
 
-  const fallback = getDefaultHudPosition(hudSize, primaryWorkArea);
+  const primaryFitSize: Size = {
+    width: Math.min(Math.round(hudSize.width), Math.max(1, Math.round(primaryWorkArea.width))),
+    height: Math.min(Math.round(hudSize.height), Math.max(1, Math.round(primaryWorkArea.height))),
+  };
+  const fallback = getDefaultHudPosition(primaryFitSize, primaryWorkArea);
   return {
     x: fallback.x,
     y: fallback.y,
-    width: hudSize.width,
-    height: hudSize.height,
+    width: primaryFitSize.width,
+    height: primaryFitSize.height,
   };
 }
 
@@ -271,22 +343,24 @@ export function computeResizedHudBounds(
 ): Rect {
   const areas = workAreas.length > 0 ? workAreas : [primaryWorkArea];
   const wa = findTargetWorkArea(currentBounds, areas, primaryWorkArea);
+  const fitWidth = Math.min(Math.round(nextSize.width), Math.max(1, Math.round(wa.width)));
+  const fitHeight = Math.min(Math.round(nextSize.height), Math.max(1, Math.round(wa.height)));
   const centerX = currentBounds.x + currentBounds.width / 2;
   const waMidX = wa.x + wa.width / 2;
 
   const rawX =
     centerX >= waMidX
-      ? currentBounds.x + currentBounds.width - nextSize.width
+      ? currentBounds.x + currentBounds.width - fitWidth
       : currentBounds.x;
   const rawY = currentBounds.y;
 
-  const maxX = wa.x + Math.max(0, wa.width - nextSize.width);
-  const maxY = wa.y + Math.max(0, wa.height - nextSize.height);
+  const maxX = wa.x + Math.max(0, wa.width - fitWidth);
+  const maxY = wa.y + Math.max(0, wa.height - fitHeight);
 
   return {
     x: Math.round(clamp(rawX, wa.x, maxX)),
     y: Math.round(clamp(rawY, wa.y, maxY)),
-    width: nextSize.width,
-    height: nextSize.height,
+    width: fitWidth,
+    height: fitHeight,
   };
 }

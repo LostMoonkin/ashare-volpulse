@@ -2,6 +2,16 @@
 
 本文件记录 `ashare-volpulse` 的主要变更历史。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.1.5] - 2026-11-26
+
+### Added
+- 标准模式桌面悬浮窗（HUD）支持拖动四边或四角自由缩放（尺寸范围 `340×360` 至 `720×960` 并自动受显示器工作区钳制），内容随窗口尺寸自适应（拉宽展示更长标的名称、拉高展示更多自选股行）。
+- 标准模式自定义窗口尺寸与缩放后的坐标经防抖持久化写入本地 SQLite（退出或切入极简模式前自动刷盘），重启及在标准/极简模式间往返切换后自动恢复。
+- 极简模式继续保持固定紧凑尺寸（`320×212`）且禁止缩放，不污染标准模式自定义尺寸。
+
+### Docs & Specs
+- 新增轻量规范 [`docs/specs/hud-resizable-standard-mode.md`](docs/specs/hud-resizable-standard-mode.md)，并登记至 `docs/specs/README.md`。
+
 ## [0.1.4] - 2026-11-26
 
 ### Fixed

@@ -9,9 +9,12 @@ vi.mock('electron', () => ({
 import {
   BossVisibilityController,
   clampHudOpacity,
+  clampHudStandardSize,
   computeDetailOverlayBounds,
   computeResizedHudBounds,
   getDefaultHudPosition,
+  getHudMaxSizeForMode,
+  getHudMinSizeForMode,
   getHudSizeForMode,
   isRectSufficientlyVisible,
   resolveHudBounds,
@@ -20,8 +23,12 @@ import {
 import {
   HUD_DEFAULT_HEIGHT,
   HUD_DEFAULT_WIDTH,
+  HUD_MAX_HEIGHT,
+  HUD_MAX_WIDTH,
   HUD_MINIMAL_HEIGHT,
   HUD_MINIMAL_WIDTH,
+  HUD_MIN_HEIGHT,
+  HUD_MIN_WIDTH,
 } from '../../src/shared/constants';
 
 const PRIMARY_WORK_AREA: Rect = { x: 0, y: 0, width: 1920, height: 1040 };
@@ -196,6 +203,63 @@ describe('windowGeometry', () => {
     expect(expanded.x).toBe(1580 + HUD_MINIMAL_WIDTH - HUD_DEFAULT_WIDTH);
     expect(expanded.y).toBe(PRIMARY_WORK_AREA.height - HUD_DEFAULT_HEIGHT);
     expect(expanded.y + expanded.height).toBeLessThanOrEqual(PRIMARY_WORK_AREA.height);
+  });
+
+  it('clamps custom standard HUD sizes within [MIN, MAX] and workArea while keeping minimal mode fixed', () => {
+    expect(clampHudStandardSize(null)).toEqual({
+      width: HUD_DEFAULT_WIDTH,
+      height: HUD_DEFAULT_HEIGHT,
+    });
+    expect(clampHudStandardSize({ width: 200, height: 100 })).toEqual({
+      width: HUD_MIN_WIDTH,
+      height: HUD_MIN_HEIGHT,
+    });
+    expect(clampHudStandardSize({ width: 1200, height: 1400 })).toEqual({
+      width: HUD_MAX_WIDTH,
+      height: HUD_MAX_HEIGHT,
+    });
+    expect(clampHudStandardSize({ width: 520, height: 680 })).toEqual({
+      width: 520,
+      height: 680,
+    });
+
+    expect(getHudSizeForMode('standard', { width: 520, height: 680 })).toEqual({
+      width: 520,
+      height: 680,
+    });
+    expect(getHudSizeForMode('minimal', { width: 520, height: 680 })).toEqual({
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+    expect(getHudMinSizeForMode('standard')).toEqual({
+      width: HUD_MIN_WIDTH,
+      height: HUD_MIN_HEIGHT,
+    });
+    expect(getHudMaxSizeForMode('standard')).toEqual({
+      width: HUD_MAX_WIDTH,
+      height: HUD_MAX_HEIGHT,
+    });
+    expect(getHudMinSizeForMode('minimal')).toEqual({
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+    expect(getHudMaxSizeForMode('minimal')).toEqual({
+      width: HUD_MINIMAL_WIDTH,
+      height: HUD_MINIMAL_HEIGHT,
+    });
+
+    // 从大屏保存的 680×900 切到 800×600 小屏：宽高自动钳制进工作区
+    const smallWorkArea: Rect = { x: 0, y: 0, width: 640, height: 560 };
+    const resolved = resolveHudBounds(
+      { x: 10, y: 10 },
+      { width: 680, height: 900 },
+      [smallWorkArea],
+      smallWorkArea
+    );
+    expect(resolved.width).toBe(640);
+    expect(resolved.height).toBe(560);
+    expect(resolved.x).toBe(0);
+    expect(resolved.y).toBe(0);
   });
 });
 

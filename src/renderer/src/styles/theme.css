@@ -68,12 +68,18 @@ body,
 .hud-viewport {
   width: 100%;
   height: 100%;
-  padding: 4px;
+  padding: 5px;
   display: flex;
+}
+
+.hud-viewport-minimal {
+  padding: 4px;
 }
 
 .hud-shell {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -128,6 +134,9 @@ body,
   display: flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.2px;
@@ -158,6 +167,7 @@ body,
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .icon-btn {
@@ -220,6 +230,10 @@ body,
 .hud-hero-label {
   font-size: 11px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hud-hero-value {

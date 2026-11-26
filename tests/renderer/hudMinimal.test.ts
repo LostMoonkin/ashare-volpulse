@@ -72,6 +72,7 @@ function makeShellState(hudMode: HudMode): DesktopShellState {
   return {
     settings: {
       hudPosition: null,
+      hudSize: null,
       hudOpacity: 0.9,
       alwaysOnTop: true,
       muted: false,

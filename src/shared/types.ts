@@ -271,6 +271,12 @@ export interface WindowPosition {
   y: number;
 }
 
+/** 窗口宽高尺寸（像素） */
+export interface WindowSize {
+  width: number;
+  height: number;
+}
+
 /** 详情浮层页签 */
 export type DetailTab = 'chart' | 'watchlist' | 'alerts' | 'settings';
 
@@ -286,6 +292,8 @@ export type HudMode = 'standard' | 'minimal';
 /** 持久化在 app_settings 中的桌面外壳设置 */
 export interface DesktopShellSettings {
   hudPosition: WindowPosition | null;
+  /** 标准模式下用户自定义的 HUD 宽高（像素）；极简模式不读取也不覆盖该值 */
+  hudSize: WindowSize | null;
   hudOpacity: number;
   alwaysOnTop: boolean;
   muted: boolean;
