@@ -28,3 +28,8 @@ Windows 桌面端 A 股盘中实时能量看板（**紧凑悬浮窗 HUD + 可展
 - **进程隔离**：网络轮询、SQLite 持久化（滚动保留近 30 个交易日）、凭据加密、系统托盘、全局老板键与 Windows 原生通知全部留在 `src/main/`；`src/renderer/` 仅做纯 UI 渲染，通过类型安全的 `src/preload/` 桥接通信（`contextIsolation: true`，`nodeIntegration: false`）。
 - **零 MSVC 编译约束**：目标 Windows 宿主机仅有 Node 26，无 MSVC（`cl.exe`）。在 Phase 0 验证并选用 Electron 内置 `node:sqlite` 或纯 JS/预编译 SQLite 方案，拒绝任何需要本地 `node-gyp` C++ 编译的依赖。
 - **测试门禁**：凡修改 `src/core/`（时间轴/午休折叠、两市聚合、累计同比、全天预测、滚动斜率、区间倍数、冷启动保护、冷却去重），必须附带通过的 `vitest` 单元测试，覆盖边界时刻（`09:25`、`09:30–09:35`、`11:30→13:00`、`15:00`、昨日同期缺失、非交易日）。每阶段结束前必须通过类型检查与测试。
+
+## Git 提交与发版约束
+
+- **本地提交、禁止自推**：所有 `feature` 与 `bugfix` 实施完成并通过类型检查与自测后，可直接暂存变更并在本地 `git commit`，完成本地落库；**严禁自行执行 `git push` 推送到远端**（包含分支与 Tag），远端推送须等待用户明确指令。
+- **Tag 同步 CHANGELOG**：每次新增 Git Tag 前，必须先更新根目录 [`CHANGELOG.md`](CHANGELOG.md)（沿用 Keep a Changelog 格式，按版本与日期补充对应变更条目），将 `CHANGELOG.md` 变更纳入提交后再创建对应 Tag。
