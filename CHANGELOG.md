@@ -2,6 +2,26 @@
 
 本文件记录 `ashare-volpulse` 的主要变更历史。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.1.7] - 2026-11-28
+
+### Added
+- 新增独立「复盘回放」控制台（详情浮层独立页签），与后台实盘轮询、HUD 实时看板及实盘告警通道完全隔离：
+  - 支持选择本地 SQLite 近 30 个已录制交易日（常规分时补齐同步落盘腾讯/东财近 5 日数据，新下载开箱即用），选中后默认一次性推演至 `15:00` 并立即可见全天急放/急缩三角与回放异动流。
+  - 提供完整播控条：从头播放（`09:25 → 15:00`）、播放/暂停、倍速切换（`1x / 2x / 4x / 8x`）、时间轴拖拽定位（Seek）、单步前后退（`-1m / +1m`）、键盘快捷键（`Space / ← / →`）及点击异动记录自动定位对应标的与分钟。
+  - 提供独立临时参数调优区（默认继承实盘配置），支持在不影响实盘的情况下调参重演、一键重置及「应用为实盘配置」持久化热生效。
+  - 回放告警严格仅存内存并带有 `[回放]` 前缀，绝不写入 `alert_events` 或弹出系统通知；新增独立的回放提示音开关（默认静音，开启后仅在动态播放推进触发时发声）。
+- 普通「分时能量」页签在盘后/休市静态复盘（非午休）且当日无实盘告警记录时，新增引导横幅一键携带当前标的与日期跳转至「复盘回放」控制台。
+
+### Fixed
+- 将 [SecretStore](src/main/storage/secretStore.ts) 与主进程凭据初始化/IPC 链路全面迁移至 Electron 45+ 异步 `safeStorage` API（`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`），消除运行时同步接口废弃告警并支持自动重加密回写。
+- 统一复用序列缺口守卫 `hasSeriesGap`，补齐回放引擎对历史分钟缺口（`SERIES_GAP` / `SERIES_INCOMPLETE`）与残缺基线日（`PREV_SERIES_INCOMPLETE`）的显式降级标识，以及日历缓存滞后时的本地基线日解析。
+- 后台异步补齐自选股或新分钟线落盘后按需自动刷新回放缓存，确保切换页签重挂载与播放期间参数草稿编辑互不覆盖。
+
+### Docs & CI
+- 精简 [README.md](README.md) 为面向终端用户的简洁介绍，并将技术栈、算法口径、数据源策略及开发打包说明拆分至独立技术文档 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+- 新增轻量规范 [docs/specs/interactive-replay-console.md](docs/specs/interactive-replay-console.md) 并登记至 [docs/specs/README.md](docs/specs/README.md)。
+- 配置 GitHub Release 构建工作流自动从 `CHANGELOG.md` 提取对应版本变更记录作为 Release Notes。
+
 ## [0.1.6] - 2026-11-26
 
 ### Fixed
