@@ -3,8 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   ReplayConsoleContent,
+  resolveReplayKeyboardAction,
+  resolveReplayLaunchBehavior,
   resolveReplaySoundDirection,
   shouldShowPostCloseReplayGuide,
+  shouldSyncReplayParamDraft,
   type ReplayConsoleContentProps,
 } from '../../src/renderer/src/detail/ReplayConsolePanel';
 import { MARKET_TOTAL_SYMBOL, REPLAY_ALERT_PREFIX } from '../../src/shared/constants';
@@ -255,8 +258,9 @@ describe('ReplayConsolePanel helpers and UI', () => {
     ).toBe('SHRINK');
   });
 
-  it('determines post-close empty-alert guide banner visibility accurately', () => {
+  it('determines post-close empty-alert guide banner visibility accurately (excluding LUNCH_BREAK)', () => {
     const postMarket = makeDashboardState({ mode: 'REPLAY', phase: 'POST_MARKET' });
+    const lunchBreak = makeDashboardState({ mode: 'REPLAY', phase: 'LUNCH_BREAK' });
     const liveMorning = makeDashboardState({ mode: 'LIVE', phase: 'MORNING_SESSION' });
 
     expect(
@@ -267,6 +271,15 @@ describe('ReplayConsolePanel helpers and UI', () => {
         alertsReady: true,
       })
     ).toBe(true);
+
+    expect(
+      shouldShowPostCloseReplayGuide({
+        market: lunchBreak,
+        isCliReplay: false,
+        todayAlertsCount: 0,
+        alertsReady: true,
+      })
+    ).toBe(false);
 
     expect(
       shouldShowPostCloseReplayGuide({
@@ -294,6 +307,91 @@ describe('ReplayConsolePanel helpers and UI', () => {
         alertsReady: true,
       })
     ).toBe(false);
+  });
+
+  it('prevents play ticks from overwriting paramDraft, consumes launchRequest once, handles shortcuts cleanly, and shows 09:25 single-symbol auction turnover', () => {
+    const st = makeReplayState();
+
+    // 1. 播放帧 params 未变时绝不覆盖用户正在输入的草稿；仅真实变化或 forceSync=true 时同步
+    expect(shouldSyncReplayParamDraft(null, st.params)).toBe(true);
+    expect(shouldSyncReplayParamDraft(st.params, { ...st.params })).toBe(false);
+    expect(
+      shouldSyncReplayParamDraft(st.params, { ...st.params, surgeSlopeThreshold: 4.2 })
+    ).toBe(true);
+    expect(shouldSyncReplayParamDraft(st.params, { ...st.params }, true)).toBe(true);
+
+    // 2. launchRequest 消费并清空后，切页签重挂载应保持用户当前已切换日期而不被旧请求覆盖
+    const firstMount = resolveReplayLaunchBehavior(
+      {
+        availableDates: st.availableDates,
+        tradeDate: '2026-11-24',
+        marketState: st.marketState,
+      },
+      { symbol: '000001.SH', tradeDate: '2026-11-25', seq: 1 },
+      -1
+    );
+    expect(firstMount).toEqual({
+      mode: 'load_date',
+      tradeDate: '2026-11-25',
+      symbol: '000001.SH',
+      consumedSeq: 1,
+    });
+    const remountAfterCleared = resolveReplayLaunchBehavior(
+      {
+        availableDates: st.availableDates,
+        tradeDate: '2026-11-24',
+        marketState: st.marketState,
+      },
+      null,
+      -1
+    );
+    expect(remountAfterCleared).toEqual({ mode: 'use_current' });
+
+    // 3. 按钮获焦后 ←/→ 仍可用；Space 在按钮上让位给按钮激活，在输入控件上屏蔽全部快捷键
+    expect(resolveReplayKeyboardAction({ key: 'ArrowLeft', code: 'ArrowLeft', targetTag: 'BUTTON' })).toBe(
+      'step_back'
+    );
+    expect(resolveReplayKeyboardAction({ key: 'ArrowRight', code: 'ArrowRight', targetTag: 'BUTTON' })).toBe(
+      'step_forward'
+    );
+    expect(resolveReplayKeyboardAction({ key: ' ', code: 'Space', targetTag: 'BUTTON' })).toBeNull();
+    expect(resolveReplayKeyboardAction({ key: ' ', code: 'Space', targetTag: 'DIV' })).toBe(
+      'toggle_play'
+    );
+    expect(resolveReplayKeyboardAction({ key: 'ArrowLeft', code: 'ArrowLeft', targetTag: 'INPUT' })).toBeNull();
+
+    // 4. 第 0 步 (09:25) 选中单只指数时，成交额回退展示 09:25 竞价成交额而非「降级/无数据」
+    const step0State = makeReplayState({
+      stepIndex: 0,
+      currentTimeLabel: '09:25',
+      finished: false,
+      marketState: {
+        ...makeDashboardState({ phase: 'OPEN_AUCTION' }),
+        indices: [
+          {
+            symbol: '000001.SH',
+            name: '上证指数',
+            isIndex: true,
+            scope: '全市场',
+            quote: null,
+            metrics: null,
+            auctionTurnover: 8.5e9,
+            prevAuctionTurnover: 7.1e9,
+            prevFullDayTurnover: 6.4e11,
+            todaySeries: [],
+            prevSeries: [],
+            degraded: false,
+            degradedReason: null,
+          },
+        ],
+      },
+    });
+    const step0Html = renderConsole({
+      replayState: step0State,
+      selectedSymbol: '000001.SH',
+    });
+    expect(step0Html).toContain('85.0 亿');
+    expect(step0Html).not.toContain('降级/无数据');
   });
 
   it('renders transport bar, date selector, mute button, tuning drawer, and replay alerts', () => {

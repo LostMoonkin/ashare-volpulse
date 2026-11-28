@@ -832,6 +832,9 @@ function initServices(): void {
       },
       onStateUpdate: broadcastMarketState,
       onAlertTriggered: handleAlertTriggered,
+      onRecordedDataUpdated: (dates) => {
+        interactiveReplayController?.notifyRecordedDataUpdated(dates);
+      },
     });
   }
 

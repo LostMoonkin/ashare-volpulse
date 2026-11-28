@@ -60,6 +60,7 @@ import type {
 import {
   getCybScopeGroup,
   hasCybCrossSourceMismatch,
+  hasSeriesGap,
   toAggregatorBars,
 } from '../../shared/seriesGuards';
 import {
@@ -135,6 +136,8 @@ export interface PollingSchedulerOptions {
   onStateUpdate?: (state: MarketDashboardState) => void;
   /** 告警事件派发入口（Phase 4 接入通知与提示音） */
   onAlertTriggered?: (event: AlertEventInput) => void;
+  /** 新增/补齐分钟分时或竞价快照落盘后的通知回调（供独立复盘回放按需刷新缓存） */
+  onRecordedDataUpdated?: (tradeDates: readonly string[]) => void;
 }
 
 function clampPollingInterval(sec: number): number {
@@ -158,35 +161,6 @@ function nextCalendarDate(dateStr: string): string {
   const m = String(next.getUTCMonth() + 1).padStart(2, '0');
   const d = String(next.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
-}
-
-/**
- * 检查有序分钟序列是否存在缺口（含头部缺 09:30、内部跳号或尾部截断）。
- * 当 expectedLastClosedIndex < 0（如 09:30 第一分钟尚未闭合）时，空序列不视为缺口。
- */
-function hasSeriesGap(
-  bars: readonly { minuteIndex: number }[],
-  expectedLastClosedIndex: number | null
-): boolean {
-  if (bars.length === 0) {
-    return expectedLastClosedIndex !== null && expectedLastClosedIndex >= 0;
-  }
-  if (bars[0].minuteIndex > 0) {
-    return true;
-  }
-  for (let i = 1; i < bars.length; i++) {
-    if (bars[i].minuteIndex !== bars[i - 1].minuteIndex + 1) {
-      return true;
-    }
-  }
-  if (
-    expectedLastClosedIndex !== null &&
-    expectedLastClosedIndex >= 0 &&
-    bars[bars.length - 1].minuteIndex < expectedLastClosedIndex
-  ) {
-    return true;
-  }
-  return false;
 }
 
 /**
@@ -249,6 +223,8 @@ export class PollingScheduler {
   private readonly backfillDelayMs: number;
   private readonly onStateUpdate?: (state: MarketDashboardState) => void;
   private readonly onAlertTriggered?: (event: AlertEventInput) => void;
+  private readonly onRecordedDataUpdated?: (tradeDates: readonly string[]) => void;
+  private readonly dirtyRecordedDates = new Set<string>();
 
   private readonly alertEngine: AlertEngine;
   private energyConfig: EnergyEngineConfig;
@@ -322,6 +298,7 @@ export class PollingScheduler {
     this.backfillDelayMs = options.backfillDelayMs ?? 150;
     this.onStateUpdate = options.onStateUpdate;
     this.onAlertTriggered = options.onAlertTriggered;
+    this.onRecordedDataUpdated = options.onRecordedDataUpdated;
 
     this.configuredIntervalSec = clampPollingInterval(
       options.configuredIntervalSec ?? DEFAULT_POLLING_INTERVAL_SEC
@@ -509,6 +486,7 @@ export class PollingScheduler {
 
     const run = this.executeTick().finally(() => {
       this.pollInFlight = null;
+      this.flushRecordedDataNotifications();
     });
     this.pollInFlight = run;
     return run;
@@ -1351,6 +1329,7 @@ export class PollingScheduler {
     for (const day of days) {
       if (day.bars.length > 0) {
         this.db.upsertIntradayBars(day.bars);
+        this.dirtyRecordedDates.add(day.tradeDate);
       }
       if (day.auction) {
         this.db.upsertAuctionSnapshot({
@@ -1360,6 +1339,7 @@ export class PollingScheduler {
           auctionTurnover: day.auction.auctionTurnover,
           capturedAt: nowMs,
         });
+        this.dirtyRecordedDates.add(day.tradeDate);
       }
     }
   }
@@ -1491,6 +1471,7 @@ export class PollingScheduler {
               auctionTurnover: auction.auctionTurnover,
               capturedAt: nowMs,
             });
+            this.dirtyRecordedDates.add(this.displayTradeDate);
           }
         }
       }
@@ -1612,6 +1593,7 @@ export class PollingScheduler {
     };
 
     this.db.upsertIntradayBars([bar]);
+    this.dirtyRecordedDates.add(this.displayTradeDate);
 
     const idx = existing.findIndex((b) => b.minuteIndex === bar.minuteIndex);
     const updated = [...existing];
@@ -1629,6 +1611,13 @@ export class PollingScheduler {
       this.persistClosedPendingBar(symbol, pending);
     }
     this.pendingBars.clear();
+  }
+
+  private flushRecordedDataNotifications(): void {
+    if (this.dirtyRecordedDates.size === 0 || this.stopped) return;
+    const dates = [...this.dirtyRecordedDates];
+    this.dirtyRecordedDates.clear();
+    this.onRecordedDataUpdated?.(dates);
   }
 
   private isLiveSnapshotStale(nowMs: number, phase: MarketPhase): boolean {

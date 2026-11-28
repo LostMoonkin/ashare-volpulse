@@ -6,7 +6,7 @@ import {
   minuteIndexToLabel,
   shanghaiToTimestampMs,
 } from '../../src/core';
-import { DayReplayEngine, parseReplayArgs } from '../../src/main/replay';
+import { DayReplayEngine, parseReplayArgs, resolvePrevReplayTradeDate } from '../../src/main/replay';
 import { AppDatabase } from '../../src/main/storage/database';
 import {
   MARKET_TOTAL_SYMBOL,
@@ -390,5 +390,61 @@ describe('DayReplayEngine', () => {
     expect(frames.flatMap((f) => f.triggeredAlerts).map((a) => a.id)).toEqual(
       runSummary.triggeredAlerts.map((a) => a.id)
     );
+  });
+
+  it('flags SERIES_GAP and PREV_SERIES_INCOMPLETE explicitly when today or baseline minutes are incomplete, and resolves prev date accurately when calendar is stale', () => {
+    // 1. 日历仅缓存至 11-24，但本地已录制 11-25 与 11-26 时，11-26 的昨日应取 11-25 而非跳过它
+    expect(
+      resolvePrevReplayTradeDate(
+        '2026-11-26',
+        ['2026-11-26', '2026-11-25', '2026-11-24'],
+        new Set(['2026-11-23', '2026-11-24'])
+      )
+    ).toBe('2026-11-25');
+    // 若权威日历已覆盖 11-26，则严格采信日历上一开市日 11-25（不拿 11-24 冒充）
+    expect(
+      resolvePrevReplayTradeDate(
+        '2026-11-26',
+        ['2026-11-26', '2026-11-24'],
+        new Set(['2026-11-24', '2026-11-25', '2026-11-26'])
+      )
+    ).toBe('2026-11-25');
+
+    // 2. 今日有缺口（缺 10..12 分钟，15:00 存在）在 15:00 仍应显式标为 SERIES_GAP 降级
+    const dbGap = createMemoryDb();
+    dbGap.upsertTradingDays([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+    seedFullTradingDay(dbGap, '2026-11-24');
+    seedFullTradingDay(dbGap, '2026-11-25', {
+      omitMinutesForSymbol: { symbol: '000001.SH', minutes: [10, 11, 12] },
+    });
+    const gapEngine = new DayReplayEngine({ database: dbGap, tradeDate: '2026-11-25' });
+    const gapFrames = gapEngine.computeAllFrames();
+    expect(gapFrames[240].state.marketTotal.degraded).toBe(true);
+    expect(gapFrames[240].state.marketTotal.degradedReason).toBe('SERIES_INCOMPLETE');
+    expect(gapFrames[240].state.status.degraded).toBe(true);
+    const shGapAtClose = gapFrames[240].state.indices.find((i) => i.symbol === '000001.SH');
+    expect(shGapAtClose?.degraded).toBe(true);
+    expect(shGapAtClose?.degradedReason).toBe('SERIES_GAP');
+
+    // 3. 昨日基线不足 240 分钟时应显式标为 PREV_SERIES_INCOMPLETE 降级
+    const dbPrevInc = createMemoryDb();
+    dbPrevInc.upsertTradingDays([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+    seedFullTradingDay(dbPrevInc, '2026-11-24', {
+      omitMinutesForSymbol: { symbol: '399106.SZ', minutes: [100, 101] },
+    });
+    seedFullTradingDay(dbPrevInc, '2026-11-25');
+    const prevIncEngine = new DayReplayEngine({ database: dbPrevInc, tradeDate: '2026-11-25' });
+    const prevIncFrames = prevIncEngine.computeAllFrames();
+    expect(prevIncFrames[0].state.marketTotal.degraded).toBe(true);
+    expect(prevIncFrames[0].state.marketTotal.degradedReason).toBe('PREV_SERIES_INCOMPLETE');
+    expect(prevIncFrames[240].state.marketTotal.degraded).toBe(true);
+    expect(prevIncFrames[240].state.marketTotal.degradedReason).toBe('PREV_SERIES_INCOMPLETE');
+    expect(prevIncFrames[240].state.status.degraded).toBe(true);
   });
 });

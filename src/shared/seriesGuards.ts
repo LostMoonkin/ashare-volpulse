@@ -66,3 +66,32 @@ export function toAggregatorBars(
         };
   });
 }
+
+/**
+ * 检查有序分钟序列是否存在缺口（含头部缺 09:30、内部跳号或尾部截断）。
+ * 当 expectedLastClosedIndex < 0（如 09:30 第一分钟尚未闭合）时，空序列不视为缺口。
+ */
+export function hasSeriesGap(
+  bars: readonly { minuteIndex: number }[],
+  expectedLastClosedIndex: number | null
+): boolean {
+  if (bars.length === 0) {
+    return expectedLastClosedIndex !== null && expectedLastClosedIndex >= 0;
+  }
+  if (bars[0].minuteIndex > 0) {
+    return true;
+  }
+  for (let i = 1; i < bars.length; i++) {
+    if (bars[i].minuteIndex !== bars[i - 1].minuteIndex + 1) {
+      return true;
+    }
+  }
+  if (
+    expectedLastClosedIndex !== null &&
+    expectedLastClosedIndex >= 0 &&
+    bars[bars.length - 1].minuteIndex < expectedLastClosedIndex
+  ) {
+    return true;
+  }
+  return false;
+}

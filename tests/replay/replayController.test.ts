@@ -295,4 +295,77 @@ describe('InteractiveReplayController', () => {
 
     controller.dispose();
   });
+
+  it('refreshes cached replay frames on notifyRecordedDataUpdated immediately when paused and defers cleanly when playing', () => {
+    vi.useFakeTimers();
+    const db = createMemoryDb();
+    db.upsertTradingDays([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+    seedTradingDay(db, '2026-11-24');
+    seedTradingDay(db, '2026-11-25');
+
+    // 先添加一只尚无分时数据的自选股（模拟刚添加尚未异步补齐）
+    db.upsertWatchlistItem({
+      symbol: '600519.SH',
+      name: '贵州茅台',
+      sortOrder: 0,
+      alertEnabled: true,
+      customThresholdsJson: null,
+    });
+
+    const controller = new InteractiveReplayController({
+      database: db,
+      getLiveMonitorConfig: () => ({ ...DEFAULT_MONITOR_CONFIG }),
+    });
+
+    const initial = controller.loadDate('2026-11-25');
+    expect(initial.marketState?.watchlist[0]?.degraded).toBe(true);
+
+    // 1. 后台异步补齐落盘后，若当前未播放则立即重算刷新且保留所在步号
+    controller.seek(100);
+    const bars600519: IntradayBarRow[] = [];
+    for (const d of ['2026-11-24', '2026-11-25']) {
+      for (let m = 0; m < 240; m++) {
+        bars600519.push({
+          symbol: '600519.SH',
+          tradeDate: d,
+          minuteIndex: m,
+          minuteStr: minuteIndexToLabel(m),
+          price: 1500,
+          cumVolume: 1000 * (m + 1),
+          cumTurnover: 5e7 * (m + 1),
+          barTurnover: 5e7,
+          source: 'tencent',
+        });
+      }
+    }
+    db.upsertIntradayBars(bars600519);
+    controller.notifyRecordedDataUpdated(['2026-11-25', '2026-11-24']);
+
+    const afterBackfill = controller.getState();
+    expect(afterBackfill.stepIndex).toBe(100);
+    expect(afterBackfill.marketState?.watchlist[0]?.degraded).toBe(false);
+
+    // 2. 播放期间新写入数据应延后至暂停时刷盘，绝不打断播放
+    controller.play();
+    expect(controller.getState().playing).toBe(true);
+    db.upsertWatchlistItem({
+      symbol: '300750.SZ',
+      name: '宁德时代',
+      sortOrder: 1,
+      alertEnabled: true,
+      customThresholdsJson: null,
+    });
+    controller.syncWatchlistChanged();
+    expect(controller.getState().playing).toBe(true);
+    expect(controller.getState().marketState?.watchlist.map((w) => w.symbol)).toEqual(['600519.SH']);
+
+    const paused = controller.pause();
+    expect(paused.playing).toBe(false);
+    expect(paused.marketState?.watchlist.map((w) => w.symbol)).toEqual(['600519.SH', '300750.SZ']);
+
+    controller.dispose();
+  });
 });

@@ -1,5 +1,6 @@
 export {
   DayReplayEngine,
+  resolvePrevReplayTradeDate,
   resolveReplayDates,
   type DayReplayEngineOptions,
   type ReplayFullRunSummary,

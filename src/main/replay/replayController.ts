@@ -1,8 +1,8 @@
-import { getPrevTradingDate } from '../../core';
 import {
   DEFAULT_REPLAY_SPEED,
   REPLAY_BASE_STEP_MS,
   REPLAY_SPEED_MULTIPLIERS,
+  areReplayParamsEqual,
   type ReplaySpeedMultiplier,
 } from '../../shared/constants';
 import type {
@@ -15,7 +15,11 @@ import type {
 } from '../../shared/types';
 import type { AppDatabase } from '../storage/database';
 import { sanitizeMonitorConfig } from '../storage/monitorSettingsStore';
-import { DayReplayEngine, type ReplayStepResult } from './dayReplayEngine';
+import {
+  DayReplayEngine,
+  resolvePrevReplayTradeDate,
+  type ReplayStepResult,
+} from './dayReplayEngine';
 
 export interface ReplayTimerApi {
   setInterval: (cb: () => void, ms: number) => ReturnType<typeof setInterval>;
@@ -49,20 +53,7 @@ export function extractReplayParams(config: MonitorConfig): ReplayMonitorParams 
   };
 }
 
-export function areReplayParamsEqual(a: ReplayMonitorParams, b: ReplayMonitorParams): boolean {
-  return (
-    a.expandThresholdPct === b.expandThresholdPct &&
-    a.shrinkThresholdPct === b.shrinkThresholdPct &&
-    a.slopeWindow === b.slopeWindow &&
-    a.alertsEnabled === b.alertsEnabled &&
-    a.surgeSlopeThreshold === b.surgeSlopeThreshold &&
-    a.surgeMultipleThreshold === b.surgeMultipleThreshold &&
-    a.shrinkSlopeThreshold === b.shrinkSlopeThreshold &&
-    a.shrinkMultipleThreshold === b.shrinkMultipleThreshold &&
-    a.matchMode === b.matchMode &&
-    a.cooldownMinutes === b.cooldownMinutes
-  );
-}
+export { areReplayParamsEqual };
 
 export function normalizeReplaySpeed(raw: unknown, fallback: ReplaySpeedMultiplier): ReplaySpeedMultiplier {
   if (
@@ -118,6 +109,7 @@ export class InteractiveReplayController {
   private alertCountBySymbolByStep: Array<Record<string, number>> = [];
   private totalDayAlertCount = 0;
   private lastError: string | null = null;
+  private pendingRefresh = false;
 
   constructor(options: InteractiveReplayControllerOptions) {
     this.db = options.database;
@@ -133,10 +125,7 @@ export class InteractiveReplayController {
     const openDays = new Set(this.db.getTradingDays(true).map((d) => d.date));
 
     return summaries.map((s) => {
-      let prevTradeDate = getPrevTradingDate(s.tradeDate, openDays);
-      if (!prevTradeDate) {
-        prevTradeDate = dateList.find((d) => d < s.tradeDate) ?? null;
-      }
+      const prevTradeDate = resolvePrevReplayTradeDate(s.tradeDate, dateList, openDays);
       const prevSummary = prevTradeDate ? summaryMap.get(prevTradeDate) : undefined;
       const hasPrevBaseline = Boolean(
         prevSummary && prevSummary.shBarCount > 0 && prevSummary.szBarCount > 0
@@ -157,12 +146,16 @@ export class InteractiveReplayController {
   }
 
   getState(): ReplaySessionState {
+    if (!this.playing && this.pendingRefresh) {
+      this.flushPendingRefresh();
+    }
     return this.buildSessionState('init', []);
   }
 
   loadDate(requestedDate?: string | null): ReplaySessionState {
     this.stopTimer();
     this.playing = false;
+    this.pendingRefresh = false;
 
     const availableDates = this.getAvailableDates();
     if (availableDates.length === 0) {
@@ -238,10 +231,11 @@ export class InteractiveReplayController {
     const wasPlaying = this.playing;
     this.stopTimer();
     this.playing = false;
-    if (!wasPlaying) {
+    const flushed = this.flushPendingRefresh();
+    if (!wasPlaying && !flushed) {
       return this.buildSessionState('seek', []);
     }
-    return this.emitState('seek', []);
+    return this.emitState(flushed && !wasPlaying ? 'recompute' : 'seek', []);
   }
 
   restart(): ReplaySessionState {
@@ -253,6 +247,7 @@ export class InteractiveReplayController {
     }
 
     this.stopTimer();
+    this.flushPendingRefresh();
     this.currentStepIndex = 0;
     this.playing = true;
     this.startTimer();
@@ -262,6 +257,7 @@ export class InteractiveReplayController {
   seek(targetStepIndex: number): ReplaySessionState {
     this.stopTimer();
     this.playing = false;
+    this.flushPendingRefresh();
 
     if (this.cachedFrames.length === 0) {
       return this.buildSessionState('seek', []);
@@ -280,6 +276,7 @@ export class InteractiveReplayController {
   step(delta: number): ReplaySessionState {
     this.stopTimer();
     this.playing = false;
+    this.flushPendingRefresh();
 
     if (this.cachedFrames.length === 0) {
       return this.buildSessionState('step', []);
@@ -359,15 +356,51 @@ export class InteractiveReplayController {
 
   syncWatchlistChanged(): void {
     if (!this.loadedTradeDate) return;
+    if (this.playing) {
+      this.pendingRefresh = true;
+      return;
+    }
+    this.pendingRefresh = false;
     const liveConfig = this.getLiveMonitorConfig();
     const effectiveParams = this.getEffectiveParams();
     this.safeRecomputeCurrentDate(this.loadedTradeDate, effectiveParams, liveConfig);
     this.emitState('recompute', []);
   }
 
+  /** 当调度器在后台新落盘分钟线或竞价快照时按需重算回放缓存（播放中延后至停播时生效，不打断播放） */
+  notifyRecordedDataUpdated(updatedDates?: readonly string[]): void {
+    if (!this.loadedTradeDate) return;
+    const loadedDate = this.loadedTradeDate;
+    const relevant =
+      !updatedDates ||
+      updatedDates.length === 0 ||
+      updatedDates.some(
+        (d) => d === loadedDate || d === this.loadedPrevTradeDate || d < loadedDate
+      );
+    if (!relevant) return;
+
+    this.pendingRefresh = true;
+    if (this.playing) return;
+
+    if (this.flushPendingRefresh()) {
+      this.emitState('recompute', []);
+    }
+  }
+
   dispose(): void {
     this.stopTimer();
     this.playing = false;
+  }
+
+  private flushPendingRefresh(): boolean {
+    if (!this.pendingRefresh || !this.loadedTradeDate) {
+      this.pendingRefresh = false;
+      return false;
+    }
+    this.pendingRefresh = false;
+    const liveConfig = this.getLiveMonitorConfig();
+    this.safeRecomputeCurrentDate(this.loadedTradeDate, this.getEffectiveParams(), liveConfig);
+    return true;
   }
 
   private safeRecomputeCurrentDate(
@@ -469,11 +502,15 @@ export class InteractiveReplayController {
 
       this.currentStepIndex = nextIndex;
       const frame = this.cachedFrames[nextIndex];
-      if (nextIndex >= this.cachedFrames.length - 1) {
+      const reachedEnd = nextIndex >= this.cachedFrames.length - 1;
+      if (reachedEnd) {
         this.stopTimer();
         this.playing = false;
       }
       this.emitState('play', frame.triggeredAlerts);
+      if (reachedEnd && this.flushPendingRefresh()) {
+        this.emitState('recompute', []);
+      }
     }, interval);
   }
 

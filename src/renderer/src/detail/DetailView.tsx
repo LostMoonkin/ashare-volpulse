@@ -247,6 +247,10 @@ export function DetailView() {
     setActiveTab('replay');
   };
 
+  const handleLaunchRequestConsumed = useCallback((seq: number) => {
+    setReplayLaunchRequest((prev) => (prev && prev.seq === seq ? null : prev));
+  }, []);
+
   const handleMarkAlertRead = useCallback(
     (id: number) => {
       setAlerts((prev) =>
@@ -570,6 +574,7 @@ export function DetailView() {
             <ReplayConsolePanel
               monitorConfig={monitorConfig}
               launchRequest={replayLaunchRequest}
+              onLaunchRequestConsumed={handleLaunchRequestConsumed}
               onMonitorConfigApplied={(next) => setMonitorConfig(next)}
             />
           )}

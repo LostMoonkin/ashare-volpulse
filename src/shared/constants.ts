@@ -2,6 +2,8 @@
  * 领域与系统常量（严格对齐 docs/PLAN.md 与 docs/DATA_SOURCES.md）
  */
 
+import type { ReplayMonitorParams } from './types';
+
 export const MARKET_TOTAL_SYMBOL = 'MARKET_TOTAL';
 
 /** 沪深两市总成交额聚合所用的唯一权威组合（不含北证，防重复累加） */
@@ -295,3 +297,22 @@ export const REPLAY_SPEED_MULTIPLIERS = [1, 2, 4, 8] as const;
 export type ReplaySpeedMultiplier = (typeof REPLAY_SPEED_MULTIPLIERS)[number];
 export const DEFAULT_REPLAY_SPEED: ReplaySpeedMultiplier = 2;
 export const REPLAY_BASE_STEP_MS = 240;
+
+/** 比较两份回放监控参数是否完全一致 */
+export function areReplayParamsEqual(
+  a: ReplayMonitorParams,
+  b: ReplayMonitorParams
+): boolean {
+  return (
+    a.expandThresholdPct === b.expandThresholdPct &&
+    a.shrinkThresholdPct === b.shrinkThresholdPct &&
+    a.slopeWindow === b.slopeWindow &&
+    a.alertsEnabled === b.alertsEnabled &&
+    a.surgeSlopeThreshold === b.surgeSlopeThreshold &&
+    a.surgeMultipleThreshold === b.surgeMultipleThreshold &&
+    a.shrinkSlopeThreshold === b.shrinkSlopeThreshold &&
+    a.shrinkMultipleThreshold === b.shrinkMultipleThreshold &&
+    a.matchMode === b.matchMode &&
+    a.cooldownMinutes === b.cooldownMinutes
+  );
+}

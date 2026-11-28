@@ -3,6 +3,7 @@ import {
   ALLOWED_SLOPE_WINDOWS,
   MARKET_TOTAL_SYMBOL,
   REPLAY_SPEED_MULTIPLIERS,
+  areReplayParamsEqual,
   type ReplaySpeedMultiplier,
 } from '../../../shared/constants';
 import type {
@@ -72,7 +73,7 @@ export function resolveReplaySoundDirection(
   return (preferred ?? state.newlyTriggeredAlerts[0]).direction;
 }
 
-/** 判定普通「分时能量」页签是否应展示盘后无实盘告警引导入口 */
+/** 判定普通「分时能量」页签是否应展示盘后无实盘告警引导入口（午休不弹出） */
 export function shouldShowPostCloseReplayGuide(params: {
   market: MarketDashboardState | null;
   isCliReplay: boolean;
@@ -83,9 +84,90 @@ export function shouldShowPostCloseReplayGuide(params: {
   if (params.alertsReady === false) return false;
   const status = params.market?.status;
   if (!status || !status.tradeDate) return false;
+  if (status.phase === 'LUNCH_BREAK') return false;
   const isPostCloseOrStaticReview =
     status.mode === 'REPLAY' || status.phase === 'POST_MARKET' || status.phase === 'CLOSED_DAY';
   return isPostCloseOrStaticReview && params.todayAlertsCount === 0;
+}
+
+/** 决定是否同步回放参数输入框草稿（仅首次加载、显式参数变动或后台 params 真正变化时同步，避免播放帧打断用户输入） */
+export function shouldSyncReplayParamDraft(
+  prevSyncedParams: ReplayMonitorParams | null,
+  nextParams: ReplayMonitorParams,
+  forceSync?: boolean
+): boolean {
+  if (forceSync !== undefined) return forceSync;
+  if (!prevSyncedParams) return true;
+  return !areReplayParamsEqual(prevSyncedParams, nextParams);
+}
+
+export type ReplayLaunchAction =
+  | { mode: 'load_date'; tradeDate: string; symbol?: string; consumedSeq: number }
+  | { mode: 'use_current'; symbol?: string; consumedSeq?: number }
+  | { mode: 'load_default'; symbol?: string; consumedSeq?: number };
+
+/** 计算进入「复盘回放」页签时的引导动作（仅消费未处理过的跳转请求） */
+export function resolveReplayLaunchBehavior(
+  current: Pick<ReplaySessionState, 'availableDates' | 'tradeDate' | 'marketState'>,
+  launchRequest: ReplayLaunchRequest | null,
+  handledSeq: number
+): ReplayLaunchAction {
+  const hasNewLaunch = launchRequest !== null && launchRequest.seq !== handledSeq;
+  if (hasNewLaunch && launchRequest) {
+    const reqDate = launchRequest.tradeDate?.trim();
+    const dateExists =
+      Boolean(reqDate) && current.availableDates.some((d) => d.tradeDate === reqDate);
+    if (dateExists && reqDate) {
+      return {
+        mode: 'load_date',
+        tradeDate: reqDate,
+        symbol: launchRequest.symbol,
+        consumedSeq: launchRequest.seq,
+      };
+    }
+    if (current.tradeDate && current.marketState) {
+      return {
+        mode: 'use_current',
+        symbol: launchRequest.symbol,
+        consumedSeq: launchRequest.seq,
+      };
+    }
+    return {
+      mode: 'load_default',
+      symbol: launchRequest.symbol,
+      consumedSeq: launchRequest.seq,
+    };
+  }
+
+  if (current.tradeDate && current.marketState) {
+    return { mode: 'use_current' };
+  }
+  return { mode: 'load_default' };
+}
+
+export type ReplayKeyboardAction = 'toggle_play' | 'step_back' | 'step_forward' | null;
+
+/** 解析回放控制台键盘快捷键：按钮获焦时不拦截 ←/→ 单步，仅屏蔽输入类控件与按钮上的 Space */
+export function resolveReplayKeyboardAction(params: {
+  key: string;
+  code: string;
+  targetTag?: string | null;
+  isContentEditable?: boolean;
+}): ReplayKeyboardAction {
+  const tag = params.targetTag?.toUpperCase() ?? '';
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || params.isContentEditable) {
+    return null;
+  }
+  if (params.code === 'Space') {
+    return tag === 'BUTTON' ? null : 'toggle_play';
+  }
+  if (params.key === 'ArrowLeft') {
+    return 'step_back';
+  }
+  if (params.key === 'ArrowRight') {
+    return 'step_forward';
+  }
+  return null;
 }
 
 export interface ReplayConsoleContentProps {
@@ -181,7 +263,8 @@ export function ReplayConsoleContent({
   const currentTurnover =
     selectedSymbol === MARKET_TOTAL_SYMBOL
       ? market?.marketTotal.cumTurnover ?? null
-      : resolveSymbolTurnover(selectedSnapshot);
+      : (resolveSymbolTurnover(selectedSnapshot) ??
+          (stepIndex === 0 ? selectedSnapshot?.auctionTurnover ?? null : null));
 
   const currentPrice = selectedSnapshot ? resolveSymbolPrice(selectedSnapshot) : null;
   const currentChangePct = selectedSnapshot ? resolveSymbolChangePct(selectedSnapshot) : null;
@@ -566,7 +649,10 @@ export function ReplayConsoleContent({
                 className="btn btn-sm"
                 title="从 09:25 从头动态播放"
                 disabled={busy || totalSteps === 0}
-                onClick={onRestart}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onRestart();
+                }}
               >
                 ⏮ 从头播放
               </button>
@@ -575,7 +661,10 @@ export function ReplayConsoleContent({
                 className="btn btn-sm"
                 title="后退 1 分钟（←）"
                 disabled={busy || stepIndex <= 0}
-                onClick={() => onStep(-1)}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onStep(-1);
+                }}
               >
                 ◀ -1m
               </button>
@@ -584,7 +673,10 @@ export function ReplayConsoleContent({
                 className="btn btn-sm btn-accent"
                 title={playing ? '暂停（Space）' : '播放（Space）'}
                 disabled={busy || totalSteps === 0}
-                onClick={onTogglePlay}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onTogglePlay();
+                }}
               >
                 {playing ? '⏸ 暂停' : stepIndex >= maxStep ? '▶ 重播' : '▶ 播放'}
               </button>
@@ -593,7 +685,10 @@ export function ReplayConsoleContent({
                 className="btn btn-sm"
                 title="前进 1 分钟（→）"
                 disabled={busy || stepIndex >= maxStep}
-                onClick={() => onStep(1)}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onStep(1);
+                }}
               >
                 ▶ +1m
               </button>
@@ -602,7 +697,10 @@ export function ReplayConsoleContent({
                 className="btn btn-sm"
                 title="跳至 15:00 全天收盘"
                 disabled={busy || stepIndex >= maxStep}
-                onClick={() => onSeek(maxStep)}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onSeek(maxStep);
+                }}
               >
                 ⏭ 15:00
               </button>
@@ -616,7 +714,10 @@ export function ReplayConsoleContent({
                     key={spd}
                     type="button"
                     className={`seg-btn ${replayState?.speed === spd ? 'active' : ''}`}
-                    onClick={() => onSetSpeed(spd)}
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      onSetSpeed(spd);
+                    }}
                   >
                     {spd}x
                   </button>
@@ -843,12 +944,14 @@ export interface ReplayLaunchRequest {
 export interface ReplayConsolePanelProps {
   monitorConfig: MonitorConfig | null;
   launchRequest: ReplayLaunchRequest | null;
+  onLaunchRequestConsumed?: (seq: number) => void;
   onMonitorConfigApplied: (next: MonitorConfig) => void;
 }
 
 export function ReplayConsolePanel({
   monitorConfig,
   launchRequest,
+  onLaunchRequestConsumed,
   onMonitorConfigApplied,
 }: ReplayConsolePanelProps) {
   const [replayState, setReplayState] = useState<ReplaySessionState | null>(null);
@@ -868,6 +971,7 @@ export function ReplayConsolePanel({
   const replayMutedRef = useRef(replayMuted);
   const playingRef = useRef(false);
   const handledLaunchSeqRef = useRef<number>(-1);
+  const lastSyncedParamsRef = useRef<ReplayMonitorParams | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const applyTipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -883,10 +987,11 @@ export function ReplayConsolePanel({
   }, []);
 
   const applyIncomingState = useCallback(
-    (next: ReplaySessionState, syncDraft = true) => {
+    (next: ReplaySessionState, forceSyncDraft?: boolean) => {
       playingRef.current = next.playing;
       setReplayState(next);
-      if (syncDraft) {
+      if (shouldSyncReplayParamDraft(lastSyncedParamsRef.current, next.params, forceSyncDraft)) {
+        lastSyncedParamsRef.current = next.params;
         setParamDraft(toParamDraftStrings(next.params));
       }
 
@@ -924,7 +1029,7 @@ export function ReplayConsolePanel({
   // 订阅独立回放状态推送；组件卸载（切换离开复盘页签）时若正在播放则自动暂停
   useEffect(() => {
     const unsub = window.api.onReplayStateUpdated((next) => {
-      applyIncomingState(next, true);
+      applyIncomingState(next);
     });
     return () => {
       unsub();
@@ -950,31 +1055,33 @@ export function ReplayConsolePanel({
         const current = await window.api.getReplayState();
         if (cancelled) return;
 
-        const hasNewLaunch =
-          launchRequest !== null && launchRequest.seq !== handledLaunchSeqRef.current;
-
-        if (hasNewLaunch && launchRequest) {
-          handledLaunchSeqRef.current = launchRequest.seq;
-          if (launchRequest.symbol) {
-            setSelectedSymbol(launchRequest.symbol);
-          }
-          const reqDate = launchRequest.tradeDate?.trim();
-          const dateExists =
-            Boolean(reqDate) && current.availableDates.some((d) => d.tradeDate === reqDate);
-          if (dateExists && reqDate) {
-            const loaded = await window.api.loadReplayDate(reqDate);
-            if (!cancelled) applyIncomingState(loaded, true);
-            return;
-          }
+        const action = resolveReplayLaunchBehavior(
+          current,
+          launchRequest,
+          handledLaunchSeqRef.current
+        );
+        if (action.consumedSeq !== undefined) {
+          handledLaunchSeqRef.current = action.consumedSeq;
+          onLaunchRequestConsumed?.(action.consumedSeq);
+        }
+        if (action.symbol) {
+          setSelectedSymbol(action.symbol);
         }
 
-        if (current.tradeDate && current.marketState) {
+        if (action.mode === 'load_date') {
+          const loaded = await window.api.loadReplayDate(action.tradeDate);
+          if (!cancelled) applyIncomingState(loaded, true);
+          return;
+        }
+        if (action.mode === 'use_current') {
           applyIncomingState(current, true);
           return;
         }
 
         const loaded = await window.api.loadReplayDate();
         if (!cancelled) applyIncomingState(loaded, true);
+      } catch {
+        // IPC 异常时保持静默降级，避免未捕获 Promise 拒绝
       } finally {
         if (!cancelled) setBusy(false);
       }
@@ -985,7 +1092,7 @@ export function ReplayConsolePanel({
     return () => {
       cancelled = true;
     };
-  }, [applyIncomingState, launchRequest]);
+  }, [applyIncomingState, launchRequest, onLaunchRequestConsumed]);
 
   // 当前所选标的被配置/自选列表移除时安全回退至沪深两市
   useEffect(() => {
@@ -1003,29 +1110,37 @@ export function ReplayConsolePanel({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (
-        tag === 'INPUT' ||
-        tag === 'SELECT' ||
-        tag === 'TEXTAREA' ||
-        tag === 'BUTTON' ||
-        target?.isContentEditable
-      ) {
-        return;
-      }
-      if (e.code === 'Space') {
-        e.preventDefault();
+      const action = resolveReplayKeyboardAction({
+        key: e.key,
+        code: e.code,
+        targetTag: target?.tagName,
+        isContentEditable: target?.isContentEditable,
+      });
+      if (!action) return;
+
+      e.preventDefault();
+      if (action === 'toggle_play') {
         if (playingRef.current) {
-          void window.api.pauseReplay().then((s) => applyIncomingState(s, false));
+          void window.api
+            .pauseReplay()
+            .then((s) => applyIncomingState(s, false))
+            .catch(() => {});
         } else {
-          void window.api.playReplay().then((s) => applyIncomingState(s, false));
+          void window.api
+            .playReplay()
+            .then((s) => applyIncomingState(s, false))
+            .catch(() => {});
         }
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        void window.api.stepReplay(-1).then((s) => applyIncomingState(s, false));
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        void window.api.stepReplay(1).then((s) => applyIncomingState(s, false));
+      } else if (action === 'step_back') {
+        void window.api
+          .stepReplay(-1)
+          .then((s) => applyIncomingState(s, false))
+          .catch(() => {});
+      } else if (action === 'step_forward') {
+        void window.api
+          .stepReplay(1)
+          .then((s) => applyIncomingState(s, false))
+          .catch(() => {});
       }
     };
 
@@ -1070,6 +1185,7 @@ export function ReplayConsolePanel({
     void window.api
       .loadReplayDate(tradeDate)
       .then((next) => applyIncomingState(next, true))
+      .catch(() => {})
       .finally(() => setBusy(false));
   };
 
@@ -1081,6 +1197,8 @@ export function ReplayConsolePanel({
       const keepCurrent = Boolean(curDate && dates.some((d) => d.tradeDate === curDate));
       const next = await window.api.loadReplayDate(keepCurrent ? curDate : undefined);
       applyIncomingState(next, true);
+    } catch {
+      // 忽略异常防止崩溃
     } finally {
       setBusy(false);
     }
@@ -1091,17 +1209,26 @@ export function ReplayConsolePanel({
       ...buildNumericPatchFromDraft(),
       ...patch,
     };
-    void window.api.updateReplayParams(merged).then((next) => applyIncomingState(next, true));
+    void window.api
+      .updateReplayParams(merged)
+      .then((next) => applyIncomingState(next, true))
+      .catch(() => {});
   };
 
   const handleCommitParamDraft = () => {
     const patch = buildNumericPatchFromDraft();
     if (Object.keys(patch).length === 0) return;
-    void window.api.updateReplayParams(patch).then((next) => applyIncomingState(next, true));
+    void window.api
+      .updateReplayParams(patch)
+      .then((next) => applyIncomingState(next, true))
+      .catch(() => {});
   };
 
   const handleResetParams = () => {
-    void window.api.resetReplayParams().then((next) => applyIncomingState(next, true));
+    void window.api
+      .resetReplayParams()
+      .then((next) => applyIncomingState(next, true))
+      .catch(() => {});
   };
 
   const handleApplyParamsToLive = async () => {
@@ -1122,13 +1249,18 @@ export function ReplayConsolePanel({
         setApplyTip(null);
         applyTipTimerRef.current = null;
       }, 2500);
+    } catch {
+      // 忽略异常防止未捕获拒绝
     } finally {
       setBusy(false);
     }
   };
 
   const handleSeek = (targetStep: number) => {
-    void window.api.seekReplay(targetStep).then((next) => applyIncomingState(next, false));
+    void window.api
+      .seekReplay(targetStep)
+      .then((next) => applyIncomingState(next, false))
+      .catch(() => {});
   };
 
   const handleClickAlertItem = (ev: AlertDispatchPayload) => {
@@ -1166,21 +1298,36 @@ export function ReplayConsolePanel({
       onResetParams={handleResetParams}
       onApplyParamsToLive={() => void handleApplyParamsToLive()}
       onRestart={() =>
-        void window.api.restartReplay().then((next) => applyIncomingState(next, false))
+        void window.api
+          .restartReplay()
+          .then((next) => applyIncomingState(next, false))
+          .catch(() => {})
       }
       onStep={(delta) =>
-        void window.api.stepReplay(delta).then((next) => applyIncomingState(next, false))
+        void window.api
+          .stepReplay(delta)
+          .then((next) => applyIncomingState(next, false))
+          .catch(() => {})
       }
       onTogglePlay={() => {
         if (playingRef.current) {
-          void window.api.pauseReplay().then((next) => applyIncomingState(next, false));
+          void window.api
+            .pauseReplay()
+            .then((next) => applyIncomingState(next, false))
+            .catch(() => {});
         } else {
-          void window.api.playReplay().then((next) => applyIncomingState(next, false));
+          void window.api
+            .playReplay()
+            .then((next) => applyIncomingState(next, false))
+            .catch(() => {});
         }
       }}
       onSeek={handleSeek}
       onSetSpeed={(spd) =>
-        void window.api.setReplaySpeed(spd).then((next) => applyIncomingState(next, false))
+        void window.api
+          .setReplaySpeed(spd)
+          .then((next) => applyIncomingState(next, false))
+          .catch(() => {})
       }
       onAlertSymbolFilterChange={setAlertSymbolFilter}
       onAlertDirectionFilterChange={setAlertDirectionFilter}

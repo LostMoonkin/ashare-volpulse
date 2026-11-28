@@ -29,7 +29,11 @@ import {
   type CoreIndexSymbol,
   type OptionalIndexSymbol,
 } from '../../shared/constants';
-import { hasCybCrossSourceMismatch, toAggregatorBars } from '../../shared/seriesGuards';
+import {
+  hasCybCrossSourceMismatch,
+  hasSeriesGap,
+  toAggregatorBars,
+} from '../../shared/seriesGuards';
 import type {
   AlertDispatchPayload,
   AlertEventRow,
@@ -139,6 +143,28 @@ function minuteIndexToTimestampMs(tradeDate: string, minuteIndex: number): numbe
 }
 
 /**
+ * 解析给定交易日对应的上一对比交易日：
+ * - 若权威交易日历（trading_days）已覆盖 tradeDate，严格采信日历上一开市日；
+ * - 若权威日历缺失或滞后于本地录制日期（如仅靠公开 5 日分时补齐），取日历候选与本地最近已录制早于 tradeDate 日期中的较新者。
+ */
+export function resolvePrevReplayTradeDate(
+  tradeDate: string,
+  availableDates: readonly string[],
+  openDays: ReadonlySet<string>
+): string | null {
+  const sortedDesc = [...availableDates].sort((a, b) => b.localeCompare(a));
+  const recordedPrev = sortedDesc.find((d) => d < tradeDate) ?? null;
+  const calendarPrev = getPrevTradingDate(tradeDate, openDays);
+  if (openDays.has(tradeDate)) {
+    return calendarPrev ?? recordedPrev;
+  }
+  if (recordedPrev && (!calendarPrev || recordedPrev > calendarPrev)) {
+    return recordedPrev;
+  }
+  return calendarPrev ?? recordedPrev;
+}
+
+/**
  * 解析回放交易日与上一对比交易日（严格基于本地 SQLite 真实录制数据）。
  */
 export function resolveReplayDates(
@@ -158,11 +184,7 @@ export function resolveReplayDates(
   }
 
   const openDays = new Set(database.getTradingDays(true).map((d) => d.date));
-  let prevTradeDate = getPrevTradingDate(tradeDate, openDays);
-  if (!prevTradeDate) {
-    // 若未缓存交易日历，则退回使用本地录制日期中严格早于 tradeDate 的最近一日
-    prevTradeDate = availableDates.find((d) => d < tradeDate) ?? null;
-  }
+  const prevTradeDate = resolvePrevReplayTradeDate(tradeDate, availableDates, openDays);
 
   return {
     tradeDate,
@@ -196,6 +218,7 @@ export class DayReplayEngine {
   private readonly todayAuctionBySymbol = new Map<string, { openPrice: number; auctionTurnover: number }>();
   private readonly prevAuctionBySymbol = new Map<string, { openPrice: number; auctionTurnover: number }>();
   private readonly predictionProfiles = new Map<string, IntradayPredictionProfile | null>();
+  private readonly prevSeriesIncompleteBySymbol = new Map<string, boolean>();
 
   private currentStepIndex = -1;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -206,6 +229,8 @@ export class DayReplayEngine {
 
   private cachedPrevAggBars: ReturnType<typeof aggregateMarketTotalSeries>['bars'] = [];
   private cachedPrevAggPoints: MarketTotalBarPoint[] = [];
+  private cachedPrevAggDegraded = false;
+  private cachedPrevAggHasGap = false;
   private cachedPrevAggAuctionTurnover: number | null = null;
   private cachedPrevFullDayTurnover: number | null = null;
   private cachedTodayAggAuction: { auctionTurnover: number | null; degraded: boolean } = {
@@ -351,6 +376,9 @@ export class DayReplayEngine {
       toAggregatorBars(szPrevAll)
     );
     this.cachedPrevAggBars = prevAggSeries.bars;
+    this.cachedPrevAggDegraded = prevAggSeries.degraded;
+    this.cachedPrevAggHasGap =
+      prevAggSeries.bars.length > 0 && hasSeriesGap(prevAggSeries.bars, TOTAL_MINUTE_BARS - 1);
     this.cachedPrevAggPoints = prevAggSeries.bars.map((b) => ({
       minuteIndex: b.minuteIndex,
       cumTurnover: b.cumTurnover,
@@ -440,6 +468,10 @@ export class DayReplayEngine {
     if (this.prevTradeDate) {
       const prevBars = this.db.getIntradayBars(sym, this.prevTradeDate);
       this.prevBarsBySymbol.set(sym, prevBars);
+      this.prevSeriesIncompleteBySymbol.set(
+        sym,
+        prevBars.length > 0 && hasSeriesGap(prevBars, TOTAL_MINUTE_BARS - 1)
+      );
 
       const prevAuc = this.db.getAuctionSnapshot(sym, this.prevTradeDate);
       if (prevAuc) {
@@ -450,6 +482,7 @@ export class DayReplayEngine {
       }
     } else {
       this.prevBarsBySymbol.set(sym, []);
+      this.prevSeriesIncompleteBySymbol.set(sym, false);
     }
 
     this.predictionProfiles.set(sym, loadSymbolPredictionProfile(this.db, sym, this.tradeDate));
@@ -751,6 +784,17 @@ export class DayReplayEngine {
 
     if (minuteIndex === null) {
       // 09:25 集合竞价帧：展示竞价锚点，不进入连续竞价斜率与告警
+      let aucDegraded = todayAggAuc.degraded;
+      let aucDegradedReason: string | null = todayAggAuc.degraded
+        ? '09:25 集合竞价数据缺失（不补零）'
+        : null;
+      if (!aucDegraded && prevAggBars.length === 0 && this.prevTradeDate) {
+        aucDegraded = true;
+        aucDegradedReason = 'MISSING_PREV_BASELINE';
+      } else if (!aucDegraded && (this.cachedPrevAggDegraded || this.cachedPrevAggHasGap)) {
+        aucDegraded = true;
+        aucDegradedReason = 'PREV_SERIES_INCOMPLETE';
+      }
       return {
         symbol: MARKET_TOTAL_SYMBOL,
         name: '沪深两市',
@@ -765,8 +809,8 @@ export class DayReplayEngine {
         metrics: null,
         todaySeries: [],
         prevSeries: this.cachedPrevAggPoints,
-        degraded: todayAggAuc.degraded,
-        degradedReason: todayAggAuc.degraded ? '09:25 集合竞价数据缺失（不补零）' : null,
+        degraded: aucDegraded,
+        degradedReason: aucDegradedReason,
       };
     }
 
@@ -801,11 +845,22 @@ export class DayReplayEngine {
       { maxTimestampDriftMs: 60_000 }
     );
 
-    let degraded = snapAgg.degraded;
-    let degradedReason: string | null = snapAgg.reason;
-    if (prevAggBars.length === 0) {
+    const prevMissing = prevAggBars.length === 0;
+    const todayHasGap = todayAggSeries.degraded || hasSeriesGap(todayAggSeries.bars, minuteIndex);
+    const prevIncomplete =
+      !prevMissing && (this.cachedPrevAggDegraded || this.cachedPrevAggHasGap);
+
+    const alertDegraded = snapAgg.degraded || prevMissing;
+    let degraded = alertDegraded;
+    let degradedReason: string | null =
+      snapAgg.reason ?? (prevMissing ? 'MISSING_PREV_BASELINE' : null);
+
+    if (!degraded && todayHasGap) {
       degraded = true;
-      degradedReason = degradedReason ?? 'MISSING_PREV_BASELINE';
+      degradedReason = todayAggSeries.degraded ? 'SERIES_INCOMPLETE' : 'SERIES_GAP';
+    } else if (!degraded && prevIncomplete) {
+      degraded = true;
+      degradedReason = 'PREV_SERIES_INCOMPLETE';
     }
 
     const alertCfg = resolveAlertConfig(this.alertEngine.getGlobalConfig());
@@ -833,7 +888,7 @@ export class DayReplayEngine {
         tradeDate: this.tradeDate,
         timestampMs,
         metrics,
-        degraded,
+        degraded: alertDegraded,
       });
       if (evalRes.triggered && evalRes.event) {
         emitReplayAlert(evalRes.event);
@@ -903,6 +958,15 @@ export class DayReplayEngine {
     const prevClose = prevAll.length > 0 ? prevAll[prevAll.length - 1].price : 0;
 
     if (minuteIndex === null) {
+      let aucDegraded = todayAuc === null;
+      let aucDegradedReason: string | null = todayAuc === null ? 'NO_AUCTION_SNAPSHOT' : null;
+      if (!aucDegraded && prevAll.length === 0) {
+        aucDegraded = true;
+        aucDegradedReason = 'MISSING_PREV_BASELINE';
+      } else if (!aucDegraded && this.prevSeriesIncompleteBySymbol.get(symbol)) {
+        aucDegraded = true;
+        aucDegradedReason = 'PREV_SERIES_INCOMPLETE';
+      }
       return {
         symbol,
         name: MONITORED_INDEX_NAMES[symbol] ?? name,
@@ -916,8 +980,8 @@ export class DayReplayEngine {
         prevFullDayTurnover,
         todaySeries: [],
         prevSeries: prevAll,
-        degraded: todayAuc === null,
-        degradedReason: todayAuc === null ? 'NO_AUCTION_SNAPSHOT' : null,
+        degraded: aucDegraded,
+        degradedReason: aucDegradedReason,
       };
     }
 
@@ -931,16 +995,26 @@ export class DayReplayEngine {
 
     let degraded = false;
     let degradedReason: string | null = null;
+    let alertDegraded = false;
     if (!curBar) {
       degraded = true;
       degradedReason = 'MISSING_MINUTE_BAR';
+      alertDegraded = true;
     } else if (crossSourceMismatch) {
       degraded = true;
       degradedReason = 'CROSS_SOURCE_SCOPE_MISMATCH';
+      alertDegraded = true;
     }
     if (prevAll.length === 0) {
       degraded = true;
       degradedReason = degradedReason ?? 'MISSING_PREV_BASELINE';
+      alertDegraded = true;
+    } else if (hasSeriesGap(todayVisible, minuteIndex)) {
+      degraded = true;
+      degradedReason = degradedReason ?? 'SERIES_GAP';
+    } else if (this.prevSeriesIncompleteBySymbol.get(symbol)) {
+      degraded = true;
+      degradedReason = degradedReason ?? 'PREV_SERIES_INCOMPLETE';
     }
 
     const quote: QuoteSnapshot | null = curBar
@@ -988,7 +1062,7 @@ export class DayReplayEngine {
         tradeDate: this.tradeDate,
         timestampMs,
         metrics,
-        degraded,
+        degraded: alertDegraded,
         symbolOverride: params.symbolOverride,
       });
       if (evalRes.triggered && evalRes.event) {
