@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   parseCredentialsEnv,
   resolveDefaultCredentialsEnvPath,
@@ -266,5 +266,108 @@ describe('SecretStore', () => {
     });
     expect(macStore.getApiKey()).toBe('mac-file-secret');
     expect(macStore.getStatus().source).toBe('credentialsFile');
+  });
+
+  it('uses Electron 45+ async safeStorage APIs exclusively without invoking deprecated sync methods', async () => {
+    const dir = createTempDir();
+    const encPath = path.join(dir, 'hithink-key.enc');
+
+    const deprecatedSyncSpy = vi.fn(() => {
+      throw new Error('Deprecated sync safeStorage method must not be called');
+    });
+
+    let shouldReEncryptNext = false;
+    const createAsyncAdapter = (available = true): SafeStorageAdapter => ({
+      isAsyncEncryptionAvailable: async () => available,
+      encryptStringAsync: async (plainText: string) => {
+        const buf = Buffer.from(plainText, 'utf8');
+        const masked = Buffer.alloc(buf.length);
+        for (let i = 0; i < buf.length; i++) {
+          masked[i] = buf[i] ^ 0x5a;
+        }
+        return Buffer.concat([Buffer.from('ENCv2:'), masked]);
+      },
+      decryptStringAsync: async (encrypted: Buffer) => {
+        const prefix = encrypted.subarray(0, 6).toString('utf8');
+        if (prefix !== 'ENCv1:' && prefix !== 'ENCv2:') {
+          throw new Error('Invalid ciphertext');
+        }
+        const body = encrypted.subarray(6);
+        const plain = Buffer.alloc(body.length);
+        for (let i = 0; i < body.length; i++) {
+          plain[i] = body[i] ^ 0x5a;
+        }
+        const reEncrypt = shouldReEncryptNext;
+        shouldReEncryptNext = false;
+        return { result: plain.toString('utf8'), shouldReEncrypt: reEncrypt };
+      },
+      // 同时挂载废弃同步方法桩：若被误调用会立即触发断言失败
+      isEncryptionAvailable: deprecatedSyncSpy,
+      encryptString: deprecatedSyncSpy,
+      decryptString: deprecatedSyncSpy,
+    });
+
+    const store1 = new SecretStore({
+      encryptedFilePath: encPath,
+      safeStorage: createAsyncAdapter(true),
+      env: {},
+      credentialsEnvPath: path.join(dir, 'missing.env'),
+    });
+
+    await store1.initialize();
+    expect(await store1.getStatusAsync()).toEqual({
+      configured: false,
+      source: 'none',
+      encryptionAvailable: true,
+    });
+
+    // 异步加密保存后：立即反映至同步 getApiKey() 与 getStatus()，且磁盘无明文
+    await store1.setStoredApiKeyAsync('async-secret-key-001');
+    expect(store1.getApiKey()).toBe('async-secret-key-001');
+    expect(store1.getStatus()).toEqual({
+      configured: true,
+      source: 'safeStorage',
+      encryptionAvailable: true,
+    });
+    expect(fs.readFileSync(encPath, 'utf8')).not.toContain('async-secret-key-001');
+
+    // 模拟重启并触发 shouldReEncrypt：新实例 initialize() 应解密并自动异步重加密回写
+    shouldReEncryptNext = true;
+    const store2 = new SecretStore({
+      encryptedFilePath: encPath,
+      safeStorage: createAsyncAdapter(true),
+      env: {},
+      credentialsEnvPath: path.join(dir, 'missing.env'),
+    });
+    await store2.initialize();
+    expect(store2.getApiKey()).toBe('async-secret-key-001');
+    expect(fs.readFileSync(encPath).subarray(0, 6).toString('utf8')).toBe('ENCv2:');
+
+    // 清除凭据后立即失效
+    store2.clearStoredApiKey();
+    expect(store2.getApiKey()).toBeNull();
+    expect(await store2.getStatusAsync()).toEqual({
+      configured: false,
+      source: 'none',
+      encryptionAvailable: true,
+    });
+
+    // 异步不可用时拒绝写入并回退 env
+    const unavailableAsyncStore = new SecretStore({
+      encryptedFilePath: encPath,
+      safeStorage: createAsyncAdapter(false),
+      env: { HITHINK_FINANCE_API_KEY: 'env-fallback-key' },
+      credentialsEnvPath: path.join(dir, 'missing.env'),
+    });
+    await unavailableAsyncStore.initialize();
+    await expect(unavailableAsyncStore.setStoredApiKeyAsync('blocked-key')).rejects.toThrow();
+    expect(unavailableAsyncStore.getApiKey()).toBe('env-fallback-key');
+    expect(await unavailableAsyncStore.getStatusAsync()).toEqual({
+      configured: true,
+      source: 'env',
+      encryptionAvailable: false,
+    });
+
+    expect(deprecatedSyncSpy).not.toHaveBeenCalled();
   });
 });

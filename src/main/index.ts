@@ -260,7 +260,7 @@ function requestQuit(): void {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle(IPC_CHANNELS.APP_GET_BOOTSTRAP_STATE, (): BootstrapState => {
+  ipcMain.handle(IPC_CHANNELS.APP_GET_BOOTSTRAP_STATE, async (): Promise<BootstrapState> => {
     if (!database || !secretStore) {
       throw new Error('Core storage services are not initialized.');
     }
@@ -270,7 +270,7 @@ function registerIpcHandlers(): void {
       nodeVersion: process.versions.node,
       dbReady: true,
       retention: database.getRetentionStats(),
-      secretStatus: secretStore.getStatus(),
+      secretStatus: await secretStore.getStatusAsync(),
     };
   });
 
@@ -281,29 +281,29 @@ function registerIpcHandlers(): void {
     return database.getRetentionStats();
   });
 
-  ipcMain.handle(IPC_CHANNELS.SECRET_GET_STATUS, () => {
+  ipcMain.handle(IPC_CHANNELS.SECRET_GET_STATUS, async () => {
     if (!secretStore) {
       throw new Error('SecretStore is not initialized.');
     }
-    return secretStore.getStatus();
+    return secretStore.getStatusAsync();
   });
 
-  ipcMain.handle(IPC_CHANNELS.SECRET_SAVE_KEY, (_event, apiKey: string) => {
+  ipcMain.handle(IPC_CHANNELS.SECRET_SAVE_KEY, async (_event, apiKey: string) => {
     if (!secretStore) {
       throw new Error('SecretStore is not initialized.');
     }
-    secretStore.setStoredApiKey(apiKey);
+    await secretStore.setStoredApiKeyAsync(apiKey);
     // 凭据更新后即时重拉权威交易日历并刷新状态，无需重启解除日历降级
     void scheduler?.refreshCalendarNow().catch(() => {});
-    return secretStore.getStatus();
+    return secretStore.getStatusAsync();
   });
 
-  ipcMain.handle(IPC_CHANNELS.SECRET_CLEAR_KEY, () => {
+  ipcMain.handle(IPC_CHANNELS.SECRET_CLEAR_KEY, async () => {
     if (!secretStore) {
       throw new Error('SecretStore is not initialized.');
     }
     secretStore.clearStoredApiKey();
-    return secretStore.getStatus();
+    return secretStore.getStatusAsync();
   });
 
   ipcMain.handle(IPC_CHANNELS.SECRET_TEST_CONNECTION, async (): Promise<ProviderHealthStatus> => {
@@ -642,7 +642,7 @@ function registerIpcHandlers(): void {
   );
 }
 
-function initServices(): void {
+async function initServices(): Promise<void> {
   const userDataDir = app.getPath('userData');
   try {
     migrateLegacyUserDataDir(userDataDir);
@@ -665,6 +665,7 @@ function initServices(): void {
     encryptedFilePath: encryptedKeyPath,
     safeStorage,
   });
+  await secretStore.initialize();
 
   settingsStore = new ShellSettingsStore(database);
   shellSettings = settingsStore.load();
@@ -859,12 +860,12 @@ if (replayCliParseError) {
 
   app
     .whenReady()
-    .then(() => {
+    .then(async () => {
       // macOS 作为菜单栏 + 悬浮窗驻留工具运行，不占用 Dock 图标
       if (process.platform === 'darwin') {
         app.dock?.hide();
       }
-      initServices();
+      await initServices();
       registerIpcHandlers();
 
       if (shellSettings) {

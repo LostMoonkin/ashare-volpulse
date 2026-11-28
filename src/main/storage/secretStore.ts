@@ -4,11 +4,14 @@ import path from 'node:path';
 import { HITHINK_API_KEY_ENV } from '../../shared/constants';
 import type { SecretSource, SecretStatus } from '../../shared/types';
 
-/** Electron safeStorage 的最小抽象接口，便于单测注入 */
+/** Electron safeStorage 的最小抽象接口，同时兼容 Electron 45+ 异步 API 与旧同步测试桩 */
 export interface SafeStorageAdapter {
-  isEncryptionAvailable(): boolean;
-  encryptString(plainText: string): Buffer;
-  decryptString(encrypted: Buffer): string;
+  isAsyncEncryptionAvailable?(): Promise<boolean>;
+  encryptStringAsync?(plainText: string): Promise<Buffer>;
+  decryptStringAsync?(encrypted: Buffer): Promise<{ result: string; shouldReEncrypt: boolean }>;
+  isEncryptionAvailable?(): boolean;
+  encryptString?(plainText: string): Buffer;
+  decryptString?(encrypted: Buffer): string;
 }
 
 export interface SecretStoreOptions {
@@ -113,6 +116,10 @@ export class SecretStore {
   private readonly env: NodeJS.ProcessEnv;
   private readonly credentialsEnvPath: string;
 
+  private encryptionAvailableCache: boolean | null = null;
+  private cachedSafeStorageKey: string | null = null;
+  private cachedEncryptedFileMtimeMs: number | null = null;
+
   constructor(options: SecretStoreOptions) {
     this.encryptedFilePath = options.encryptedFilePath;
     this.safeStorage = options.safeStorage;
@@ -123,12 +130,91 @@ export class SecretStore {
       resolveDefaultCredentialsEnvPath(platform, this.env, options.homeDir);
   }
 
-  private isEncryptionAvailable(): boolean {
+  private usesAsyncSafeStorage(): boolean {
+    return typeof this.safeStorage?.isAsyncEncryptionAvailable === 'function';
+  }
+
+  private isSyncEncryptionAvailable(): boolean {
     try {
-      return Boolean(this.safeStorage?.isEncryptionAvailable());
+      return Boolean(this.safeStorage?.isEncryptionAvailable?.());
     } catch {
       return false;
     }
+  }
+
+  private isEncryptionAvailable(): boolean {
+    if (this.usesAsyncSafeStorage()) {
+      return Boolean(this.encryptionAvailableCache);
+    }
+    return this.isSyncEncryptionAvailable();
+  }
+
+  private async checkAsyncEncryptionAvailable(): Promise<boolean> {
+    try {
+      const available = Boolean(await this.safeStorage?.isAsyncEncryptionAvailable?.());
+      this.encryptionAvailableCache = available;
+      return available;
+    } catch {
+      this.encryptionAvailableCache = false;
+      return false;
+    }
+  }
+
+  private async refreshSafeStorageCacheAsync(): Promise<void> {
+    const available = await this.checkAsyncEncryptionAvailable();
+    if (!available || !fs.existsSync(this.encryptedFilePath)) {
+      this.cachedSafeStorageKey = null;
+      this.cachedEncryptedFileMtimeMs = null;
+      return;
+    }
+
+    try {
+      const stat = fs.statSync(this.encryptedFilePath);
+      if (this.cachedEncryptedFileMtimeMs === stat.mtimeMs && this.cachedSafeStorageKey !== null) {
+        return;
+      }
+
+      const encrypted = fs.readFileSync(this.encryptedFilePath);
+      if (encrypted.length === 0) {
+        this.cachedSafeStorageKey = null;
+        this.cachedEncryptedFileMtimeMs = stat.mtimeMs;
+        return;
+      }
+
+      const decryptedObj = await this.safeStorage?.decryptStringAsync?.(encrypted);
+      const decrypted = decryptedObj?.result.trim() ?? '';
+      this.cachedSafeStorageKey = decrypted || null;
+      this.cachedEncryptedFileMtimeMs = stat.mtimeMs;
+
+      if (
+        decryptedObj?.shouldReEncrypt &&
+        decrypted &&
+        typeof this.safeStorage?.encryptStringAsync === 'function'
+      ) {
+        try {
+          const reEncrypted = await this.safeStorage.encryptStringAsync(decrypted);
+          fs.writeFileSync(this.encryptedFilePath, reEncrypted, { mode: 0o600 });
+          this.cachedEncryptedFileMtimeMs = fs.statSync(this.encryptedFilePath).mtimeMs;
+        } catch {
+          // 重加密失败不影响已解密内存态与后续读取
+        }
+      }
+    } catch {
+      // 解密失败时静默降级至后续来源，且绝不泄露原始凭据内容
+      this.cachedSafeStorageKey = null;
+      this.cachedEncryptedFileMtimeMs = null;
+    }
+  }
+
+  /**
+   * 异步初始化（优先使用 Electron 45+ safeStorage 异步 API 预热可用性与缓存明文，避免触发同步 API 废弃告警）。
+   */
+  async initialize(): Promise<void> {
+    if (this.usesAsyncSafeStorage()) {
+      await this.refreshSafeStorageCacheAsync();
+      return;
+    }
+    this.encryptionAvailableCache = this.isSyncEncryptionAvailable();
   }
 
   private readFromSafeStorage(): string | null {
@@ -136,12 +222,17 @@ export class SecretStore {
       return null;
     }
     if (!fs.existsSync(this.encryptedFilePath)) {
+      this.cachedSafeStorageKey = null;
+      this.cachedEncryptedFileMtimeMs = null;
       return null;
+    }
+    if (this.usesAsyncSafeStorage()) {
+      return this.cachedSafeStorageKey;
     }
     try {
       const encrypted = fs.readFileSync(this.encryptedFilePath);
       if (encrypted.length === 0) return null;
-      const decrypted = this.safeStorage.decryptString(encrypted).trim();
+      const decrypted = this.safeStorage.decryptString?.(encrypted).trim() ?? '';
       return decrypted || null;
     } catch {
       // 解密失败时静默降级至后续来源，且绝不泄露原始凭据内容
@@ -194,7 +285,7 @@ export class SecretStore {
   }
 
   /**
-   * 获取脱敏配置状态（可安全通过 IPC 返回给渲染进程）。
+   * 获取脱敏配置状态（同步读取当前缓存，兼容纯同步桩）。
    */
   getStatus(): SecretStatus {
     const { value, source } = this.resolve();
@@ -206,19 +297,61 @@ export class SecretStore {
   }
 
   /**
-   * 将用户输入的同花顺 API Key 经 safeStorage 加密写入本地文件。
+   * 获取脱敏配置状态（优先通过 safeStorage 异步 API 刷新可用性与解密缓存）。
+   */
+  async getStatusAsync(): Promise<SecretStatus> {
+    if (this.usesAsyncSafeStorage()) {
+      await this.refreshSafeStorageCacheAsync();
+    }
+    return this.getStatus();
+  }
+
+  /**
+   * 同步将 API Key 经 safeStorage 写入本地文件（仅用于旧同步桩；Electron 45+ 请使用 setStoredApiKeyAsync）。
    */
   setStoredApiKey(plainKey: string): void {
     const trimmed = plainKey.trim();
     if (!trimmed) {
       throw new Error('API Key cannot be empty; use clearStoredApiKey() to remove it.');
     }
-    if (!this.safeStorage || !this.isEncryptionAvailable()) {
+    if (this.usesAsyncSafeStorage()) {
+      throw new Error('Use setStoredApiKeyAsync() when async safeStorage is active.');
+    }
+    if (!this.safeStorage || !this.isEncryptionAvailable() || !this.safeStorage.encryptString) {
       throw new Error('OS safeStorage encryption is not available.');
     }
     const encrypted = this.safeStorage.encryptString(trimmed);
     fs.mkdirSync(path.dirname(this.encryptedFilePath), { recursive: true });
     fs.writeFileSync(this.encryptedFilePath, encrypted, { mode: 0o600 });
+  }
+
+  /**
+   * 将用户输入的同花顺 API Key 经 safeStorage 异步加密写入本地文件并刷新内存缓存。
+   */
+  async setStoredApiKeyAsync(plainKey: string): Promise<void> {
+    const trimmed = plainKey.trim();
+    if (!trimmed) {
+      throw new Error('API Key cannot be empty; use clearStoredApiKey() to remove it.');
+    }
+    if (!this.usesAsyncSafeStorage()) {
+      this.setStoredApiKey(trimmed);
+      return;
+    }
+
+    const available = await this.checkAsyncEncryptionAvailable();
+    if (!available || typeof this.safeStorage?.encryptStringAsync !== 'function') {
+      throw new Error('OS safeStorage encryption is not available.');
+    }
+
+    const encrypted = await this.safeStorage.encryptStringAsync(trimmed);
+    fs.mkdirSync(path.dirname(this.encryptedFilePath), { recursive: true });
+    fs.writeFileSync(this.encryptedFilePath, encrypted, { mode: 0o600 });
+    this.cachedSafeStorageKey = trimmed;
+    try {
+      this.cachedEncryptedFileMtimeMs = fs.statSync(this.encryptedFilePath).mtimeMs;
+    } catch {
+      this.cachedEncryptedFileMtimeMs = null;
+    }
   }
 
   /**
@@ -228,5 +361,7 @@ export class SecretStore {
     if (fs.existsSync(this.encryptedFilePath)) {
       fs.unlinkSync(this.encryptedFilePath);
     }
+    this.cachedSafeStorageKey = null;
+    this.cachedEncryptedFileMtimeMs = null;
   }
 }
