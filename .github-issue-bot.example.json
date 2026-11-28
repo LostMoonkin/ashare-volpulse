@@ -1,0 +1,7 @@
+{
+  "owner": "LostMoonkin",
+  "repo": "ashare-volpulse",
+  "appId": "<YOUR_GITHUB_APP_ID>",
+  "installationId": "<YOUR_INSTALLATION_ID>",
+  "privateKeyPath": "C:\\Users\\<YOUR_USER>\\.config\\gh-boot\\<your-app>.private-key.pem"
+}

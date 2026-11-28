@@ -24,6 +24,7 @@ credentials.env
 *.enc
 *.pem
 *.key
+.github-issue-bot.local.json
 
 # Logs & OS artifacts
 *.log
