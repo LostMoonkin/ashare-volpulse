@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { ReplaySpeedMultiplier } from '../shared/constants';
 import { IPC_CHANNELS, type PreloadApi } from '../shared/ipc';
 import type {
   AlertDirection,
@@ -8,6 +9,8 @@ import type {
   MarketDashboardState,
   MonitorConfig,
   OpenDetailOptions,
+  ReplayMonitorParams,
+  ReplaySessionState,
   WatchlistAddInput,
   WatchlistUpdateInput,
 } from '../shared/types';
@@ -66,6 +69,22 @@ const api: PreloadApi = {
   simulateAlert: (direction: AlertDirection, symbol?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.ALERT_SIMULATE, direction, symbol),
 
+  getReplayAvailableDates: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_GET_DATES),
+  getReplayState: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_GET_STATE),
+  loadReplayDate: (tradeDate?: string | null) =>
+    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_LOAD_DATE, tradeDate),
+  playReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_PLAY),
+  pauseReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_PAUSE),
+  restartReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_RESTART),
+  seekReplay: (stepIndex: number) => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_SEEK, stepIndex),
+  stepReplay: (delta: number) => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STEP, delta),
+  setReplaySpeed: (speed: ReplaySpeedMultiplier) =>
+    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_SET_SPEED, speed),
+  updateReplayParams: (patch: Partial<ReplayMonitorParams>) =>
+    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_UPDATE_PARAMS, patch),
+  resetReplayParams: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_RESET_PARAMS),
+  applyReplayParamsToLive: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_APPLY_PARAMS_TO_LIVE),
+
   onMarketStateUpdated: (listener: (state: MarketDashboardState) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: MarketDashboardState) => {
       listener(state);
@@ -103,6 +122,16 @@ const api: PreloadApi = {
     ipcRenderer.on(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, handler);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, handler);
+    };
+  },
+
+  onReplayStateUpdated: (listener: (state: ReplaySessionState) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: ReplaySessionState) => {
+      listener(state);
+    };
+    ipcRenderer.on(IPC_CHANNELS.REPLAY_STATE_UPDATED, handler);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_STATE_UPDATED, handler);
     };
   },
 };

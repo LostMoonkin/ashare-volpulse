@@ -25,6 +25,11 @@ import {
 } from '../utils/format';
 import { AlertsPanel, type AlertHistoryScope } from './AlertsPanel';
 import { EnergyDualChart } from './EnergyDualChart';
+import {
+  ReplayConsolePanel,
+  shouldShowPostCloseReplayGuide,
+  type ReplayLaunchRequest,
+} from './ReplayConsolePanel';
 import { SettingsPanel } from './SettingsPanel';
 import { WatchlistPanel } from './WatchlistPanel';
 
@@ -36,12 +41,15 @@ export function DetailView() {
   const [monitorConfig, setMonitorConfig] = useState<MonitorConfig | null>(null);
   const [watchlistRows, setWatchlistRows] = useState<WatchlistItemRow[]>([]);
   const [alerts, setAlerts] = useState<AlertEventRow[]>([]);
+  const [alertsLoadedScopeKey, setAlertsLoadedScopeKey] = useState<string | null>(null);
   const [alertScope, setAlertScope] = useState<AlertHistoryScope>('today');
   const [activeTab, setActiveTab] = useState<DetailTab>('chart');
   const [selectedSymbol, setSelectedSymbol] = useState<string>(MARKET_TOTAL_SYMBOL);
+  const [replayLaunchRequest, setReplayLaunchRequest] = useState<ReplayLaunchRequest | null>(null);
   const [bossKeyInput, setBossKeyInput] = useState<string>('Alt+Shift+A');
   const [bossKeyFeedback, setBossKeyFeedback] = useState<BossKeyStatus | null>(null);
   const lastFocusSeqRef = useRef<number>(-1);
+  const launchSeqRef = useRef<number>(0);
   const lastSavedBossKeyRef = useRef<string | null>(null);
   const modalOpenRef = useRef<boolean>(false);
   const alertScopeRef = useRef<AlertHistoryScope>('today');
@@ -55,9 +63,13 @@ export function DetailView() {
   const loadAlerts = useCallback((scope?: AlertHistoryScope, tradeDate?: string) => {
     const resolvedScope = scope ?? alertScopeRef.current;
     const resolvedDate = resolvedScope === 'today' ? (tradeDate ?? activeTradeDateRef.current) : undefined;
+    const scopeKey = resolvedScope === 'all' ? '__ALL__' : (resolvedDate ?? '__TODAY_UNKNOWN__');
     void window.api
       .getRecentAlerts(resolvedDate, 150)
-      .then(setAlerts)
+      .then((rows) => {
+        setAlerts(rows);
+        setAlertsLoadedScopeKey(scopeKey);
+      })
       .catch(() => {});
   }, []);
 
@@ -225,6 +237,16 @@ export function DetailView() {
     setActiveTab('chart');
   };
 
+  const handleJumpToReplayConsole = () => {
+    launchSeqRef.current += 1;
+    setReplayLaunchRequest({
+      symbol: selectedSymbol,
+      tradeDate: market?.status.tradeDate ?? null,
+      seq: launchSeqRef.current,
+    });
+    setActiveTab('replay');
+  };
+
   const handleMarkAlertRead = useCallback(
     (id: number) => {
       setAlerts((prev) =>
@@ -297,6 +319,18 @@ export function DetailView() {
       : selectedSnapshot?.degradedReason ?? null;
 
   const volBadge = formatVolumeState(metrics?.volumeState);
+  const todayAlertsCount = activeTradeDate
+    ? alerts.filter((item) => item.tradeDate === activeTradeDate).length
+    : 0;
+  const alertsReady =
+    alertsLoadedScopeKey === '__ALL__' ||
+    (Boolean(activeTradeDate) && alertsLoadedScopeKey === activeTradeDate);
+  const showPostCloseGuide = shouldShowPostCloseReplayGuide({
+    market,
+    isCliReplay: Boolean(replay),
+    todayAlertsCount,
+    alertsReady,
+  });
 
   return (
     <div className="detail-viewport">
@@ -325,6 +359,13 @@ export function DetailView() {
               onClick={() => setActiveTab('chart')}
             >
               分时能量
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${activeTab === 'replay' ? 'active' : ''}`}
+              onClick={() => setActiveTab('replay')}
+            >
+              复盘回放
             </button>
             <button
               type="button"
@@ -483,6 +524,22 @@ export function DetailView() {
                 </div>
               </section>
 
+              {/* 盘后/休市无实盘告警时的独立复盘回放引导 */}
+              {showPostCloseGuide && (
+                <div className="replay-guide-banner">
+                  <span>
+                    当前为盘后/休市复盘视图，当日暂未录制到实盘急缩放告警。可前往独立回放控制台，按配置推演全天放缩三角并自由回放：
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-accent"
+                    onClick={handleJumpToReplayConsole}
+                  >
+                    前往复盘回放 →
+                  </button>
+                </div>
+              )}
+
               {/* ECharts 上下联动双图 */}
               <section className="panel-card chart-panel-card">
                 <EnergyDualChart
@@ -507,6 +564,14 @@ export function DetailView() {
                 </div>
               </section>
             </>
+          )}
+
+          {activeTab === 'replay' && (
+            <ReplayConsolePanel
+              monitorConfig={monitorConfig}
+              launchRequest={replayLaunchRequest}
+              onMonitorConfigApplied={(next) => setMonitorConfig(next)}
+            />
           )}
 
           {activeTab === 'watchlist' && (

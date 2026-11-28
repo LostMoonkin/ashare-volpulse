@@ -289,3 +289,9 @@ export const REPLAY_ALERT_PREFIX = '[回放]';
 
 /** 全天回放默认每帧间隔（毫秒），约 29 秒跑完 09:25 → 15:00 全天 */
 export const DEFAULT_REPLAY_STEP_MS = 120;
+
+/** 交互式独立复盘回放倍速配置（1x=240ms/帧, 2x=120ms/帧, 4x=60ms/帧, 8x=30ms/帧） */
+export const REPLAY_SPEED_MULTIPLIERS = [1, 2, 4, 8] as const;
+export type ReplaySpeedMultiplier = (typeof REPLAY_SPEED_MULTIPLIERS)[number];
+export const DEFAULT_REPLAY_SPEED: ReplaySpeedMultiplier = 2;
+export const REPLAY_BASE_STEP_MS = 240;

@@ -19,3 +19,4 @@
 | 桌面悬浮窗极简模式 | [桌面悬浮窗极简模式](hud-minimal-mode.md) | 已确认 |
 | 无 API Key 搜索添加场内 ETF/LOF | [无同花顺 API Key 时支持搜索并添加沪深场内 ETF/LOF](watchlist-etf-search-fallback.md) | 已确认 |
 | 标准模式悬浮窗拖动缩放 | [标准模式悬浮窗拖动缩放与窗口自适应](hud-resizable-standard-mode.md) | 已确认 |
+| 独立复盘回放控制台 | [独立复盘回放控制台](interactive-replay-console.md) | 已确认 |

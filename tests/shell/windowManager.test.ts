@@ -524,4 +524,37 @@ describe('WindowManager', () => {
       height: 620,
     });
   });
+
+  it('sends targeted detail IPC only to detailWindow and notifies onDetailHidden when detail is hidden', () => {
+    const onDetailHidden = vi.fn();
+    const wm = new WindowManager({
+      preloadPath: '/preload.js',
+      rendererHtmlPath: '/index.html',
+      initialSettings: makeSettings(),
+      onHudPositionCommitted: vi.fn(),
+      onStateChanged: vi.fn(),
+      onDetailHidden,
+    });
+
+    wm.createHudWindow();
+    const hud = mockWindows[0];
+
+    // 详情未创建时 sendToDetail 静默跳过，不发送给 HUD
+    wm.sendToDetail('replay:state-updated', { stepIndex: 1 });
+    expect(hud.sentMessages).toHaveLength(0);
+
+    wm.openDetail({ tab: 'replay' });
+    const detail = mockWindows[1];
+    detail.emitWindowEvent('ready-to-show');
+
+    wm.sendToDetail('replay:state-updated', { stepIndex: 240 });
+    expect(detail.sentMessages).toContainEqual({
+      channel: 'replay:state-updated',
+      payload: { stepIndex: 240 },
+    });
+    expect(hud.sentMessages).toHaveLength(0);
+
+    wm.hideDetail();
+    expect(onDetailHidden).toHaveBeenCalledTimes(1);
+  });
 });

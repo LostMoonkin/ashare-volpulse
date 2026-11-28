@@ -356,4 +356,39 @@ describe('DayReplayEngine', () => {
     expect(engine.markAllReplayAlertsRead('2026-11-25')).toBe(remainingUnread);
     expect(engine.getReplayAlerts().every((a) => a.isRead)).toBe(true);
   });
+
+  it('computes all 241 frames silently via computeAllFrames matching runAllSteps without triggering callbacks', () => {
+    const db = createMemoryDb();
+    db.upsertTradingDays([
+      { date: '2026-11-24', isOpen: true },
+      { date: '2026-11-25', isOpen: true },
+    ]);
+    seedFullTradingDay(db, '2026-11-24');
+    seedFullTradingDay(db, '2026-11-25', { surgeMinuteRange: [40, 46] });
+
+    const stateCbCalls: number[] = [];
+    const alertCbCalls: number[] = [];
+    const engine = new DayReplayEngine({
+      database: db,
+      tradeDate: '2026-11-25',
+      stepIntervalMs: 0,
+      onStateUpdate: () => stateCbCalls.push(1),
+      onReplayAlert: () => alertCbCalls.push(1),
+    });
+
+    const frames = engine.computeAllFrames();
+    expect(frames).toHaveLength(241);
+    expect(stateCbCalls).toHaveLength(0);
+    expect(alertCbCalls).toHaveLength(0);
+
+    // 帧 0 应保留空 recentAlerts 快照，不被后续帧篡改引用
+    expect(frames[0].state.recentAlerts).toEqual([]);
+    const runSummary = engine.runAllSteps();
+    expect(frames[240].state.marketTotal.cumTurnover).toBe(
+      runSummary.finalState.marketTotal.cumTurnover
+    );
+    expect(frames.flatMap((f) => f.triggeredAlerts).map((a) => a.id)).toEqual(
+      runSummary.triggeredAlerts.map((a) => a.id)
+    );
+  });
 });

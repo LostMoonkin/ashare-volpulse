@@ -257,6 +257,35 @@ export class AppDatabase {
     return rows.map((r) => r.trade_date);
   }
 
+  /** 查询本地已录制交易日及其沪深两市核心成分分钟条数摘要（降序） */
+  getRecordedDateSummaries(): Array<{
+    tradeDate: string;
+    shBarCount: number;
+    szBarCount: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           trade_date,
+           SUM(CASE WHEN symbol = '000001.SH' THEN 1 ELSE 0 END) AS sh_bar_count,
+           SUM(CASE WHEN symbol = '399106.SZ' THEN 1 ELSE 0 END) AS sz_bar_count
+         FROM intraday_bars
+         GROUP BY trade_date
+         ORDER BY trade_date DESC`
+      )
+      .all() as Array<{
+      trade_date: string;
+      sh_bar_count: number;
+      sz_bar_count: number;
+    }>;
+
+    return rows.map((r) => ({
+      tradeDate: r.trade_date,
+      shBarCount: Number(r.sh_bar_count ?? 0),
+      szBarCount: Number(r.sz_bar_count ?? 0),
+    }));
+  }
+
   /** 查询早于指定交易日的最近 limit 个已录制交易日（降序） */
   getRecentRecordedBarDatesBefore(beforeDate: string, limit = 10): string[] {
     const rows = this.db

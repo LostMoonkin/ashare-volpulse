@@ -1,4 +1,9 @@
-import type { CoreIndexSymbol, IndexScopeBadge, OptionalIndexSymbol } from './constants';
+import type {
+  CoreIndexSymbol,
+  IndexScopeBadge,
+  OptionalIndexSymbol,
+  ReplaySpeedMultiplier,
+} from './constants';
 
 /**
  * 前后端共享数据类型与 SQLite 持久化行契约
@@ -278,7 +283,7 @@ export interface WindowSize {
 }
 
 /** 详情浮层页签 */
-export type DetailTab = 'chart' | 'watchlist' | 'alerts' | 'settings';
+export type DetailTab = 'chart' | 'replay' | 'watchlist' | 'alerts' | 'settings';
 
 /** 打开详情浮层的可选参数 */
 export interface OpenDetailOptions {
@@ -425,4 +430,63 @@ export interface BootstrapState {
   dbReady: boolean;
   retention: DatabaseRetentionStats;
   secretStatus: SecretStatus;
+}
+
+/** 本地已录制可回放交易日摘要 */
+export interface ReplayAvailableDateInfo {
+  tradeDate: string;
+  prevTradeDate: string | null;
+  hasPrevBaseline: boolean;
+  shBarCount: number;
+  szBarCount: number;
+}
+
+/** 独立回放控制台可调临时参数（默认继承当前实盘 MonitorConfig） */
+export type ReplayMonitorParams = Pick<
+  MonitorConfig,
+  | 'expandThresholdPct'
+  | 'shrinkThresholdPct'
+  | 'slopeWindow'
+  | 'alertsEnabled'
+  | 'surgeSlopeThreshold'
+  | 'surgeMultipleThreshold'
+  | 'shrinkSlopeThreshold'
+  | 'shrinkMultipleThreshold'
+  | 'matchMode'
+  | 'cooldownMinutes'
+>;
+
+export type ReplayTriggerReason = 'init' | 'load' | 'play' | 'seek' | 'step' | 'recompute';
+
+/** 独立复盘回放控制台会话态（与实盘运行态完全隔离） */
+export interface ReplaySessionState {
+  availableDates: ReplayAvailableDateInfo[];
+  tradeDate: string | null;
+  prevTradeDate: string | null;
+  stepIndex: number;
+  totalSteps: number;
+  currentTimeLabel: string;
+  playing: boolean;
+  speed: ReplaySpeedMultiplier;
+  stepIntervalMs: number;
+  finished: boolean;
+  triggerReason: ReplayTriggerReason;
+  params: ReplayMonitorParams;
+  isCustomParams: boolean;
+  marketState: MarketDashboardState | null;
+  /** 截至当前 stepIndex 的已触发回放告警（按时间倒序） */
+  alerts: AlertDispatchPayload[];
+  /** 仅动态播放单步推进新触发的告警（load/seek/step/recompute 时为空，防误发声） */
+  newlyTriggeredAlerts: AlertDispatchPayload[];
+  /** 当前交易日全天（0..240）累计触发回放告警总数 */
+  totalDayAlertCount: number;
+  /** 各标的截至当前 stepIndex 的已触发告警数映射 */
+  alertCountBySymbol: Record<string, number>;
+  error: string | null;
+}
+
+/** 将回放临时参数应用为实盘配置后的聚合返回 */
+export interface ReplayApplyParamsResult {
+  replayState: ReplaySessionState;
+  monitorConfig: MonitorConfig;
 }

@@ -7,3 +7,12 @@ export {
   type ResolvedReplayDates,
 } from './dayReplayEngine';
 export { parseReplayArgs, type ReplayCliOptions } from './replayArgs';
+export {
+  InteractiveReplayController,
+  areReplayParamsEqual,
+  computeReplayStepIntervalMs,
+  extractReplayParams,
+  normalizeReplaySpeed,
+  type InteractiveReplayControllerOptions,
+  type ReplayTimerApi,
+} from './replayController';

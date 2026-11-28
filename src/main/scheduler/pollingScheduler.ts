@@ -1265,7 +1265,8 @@ export class PollingScheduler {
               (this.postCloseReconcileAttempts.get(sym) ?? 0) + 1
             );
           }
-          const days = await this.fetchIntradayWithFallback(sym, 2);
+          // 拉取近 5 日分时（腾讯 day/query 单次已全量包含近 5 日，零额外请求），使新用户开箱即可回放最近多日
+          const days = await this.fetchIntradayWithFallback(sym, 5);
           if (this.stopped) return;
           if (days && days.length > 0) {
             this.persistIntradayDays(days);

@@ -1,3 +1,4 @@
+import type { ReplaySpeedMultiplier } from './constants';
 import type {
   AlertDirection,
   AlertDispatchPayload,
@@ -11,6 +12,10 @@ import type {
   MonitorConfig,
   OpenDetailOptions,
   ProviderHealthStatus,
+  ReplayApplyParamsResult,
+  ReplayAvailableDateInfo,
+  ReplayMonitorParams,
+  ReplaySessionState,
   SecretStatus,
   TickerSearchResult,
   WatchlistAddInput,
@@ -57,6 +62,19 @@ export const IPC_CHANNELS = {
   SHELL_SET_DETAIL_MODAL_OPEN: 'shell:set-detail-modal-open',
   SHELL_RETRY_TRAY: 'shell:retry-tray',
   SHELL_QUIT_APP: 'shell:quit-app',
+  REPLAY_GET_DATES: 'replay:get-dates',
+  REPLAY_GET_STATE: 'replay:get-state',
+  REPLAY_LOAD_DATE: 'replay:load-date',
+  REPLAY_PLAY: 'replay:play',
+  REPLAY_PAUSE: 'replay:pause',
+  REPLAY_RESTART: 'replay:restart',
+  REPLAY_SEEK: 'replay:seek',
+  REPLAY_STEP: 'replay:step',
+  REPLAY_SET_SPEED: 'replay:set-speed',
+  REPLAY_UPDATE_PARAMS: 'replay:update-params',
+  REPLAY_RESET_PARAMS: 'replay:reset-params',
+  REPLAY_APPLY_PARAMS_TO_LIVE: 'replay:apply-params-to-live',
+  REPLAY_STATE_UPDATED: 'replay:state-updated',
 } as const;
 
 /** 通过 contextBridge 暴露给渲染进程的严格类型化 API */
@@ -94,8 +112,21 @@ export interface PreloadApi {
   markAlertRead(id: number): Promise<boolean>;
   markAllAlertsRead(tradeDate?: string): Promise<number>;
   simulateAlert(direction: AlertDirection, symbol?: string): Promise<AlertDispatchPayload>;
+  getReplayAvailableDates(): Promise<ReplayAvailableDateInfo[]>;
+  getReplayState(): Promise<ReplaySessionState>;
+  loadReplayDate(tradeDate?: string | null): Promise<ReplaySessionState>;
+  playReplay(): Promise<ReplaySessionState>;
+  pauseReplay(): Promise<ReplaySessionState>;
+  restartReplay(): Promise<ReplaySessionState>;
+  seekReplay(stepIndex: number): Promise<ReplaySessionState>;
+  stepReplay(delta: number): Promise<ReplaySessionState>;
+  setReplaySpeed(speed: ReplaySpeedMultiplier): Promise<ReplaySessionState>;
+  updateReplayParams(patch: Partial<ReplayMonitorParams>): Promise<ReplaySessionState>;
+  resetReplayParams(): Promise<ReplaySessionState>;
+  applyReplayParamsToLive(): Promise<ReplayApplyParamsResult>;
   onMarketStateUpdated(listener: (state: MarketDashboardState) => void): () => void;
   onAlertTriggered(listener: (event: AlertDispatchPayload) => void): () => void;
   onShellStateUpdated(listener: (state: DesktopShellState) => void): () => void;
   onMonitorConfigUpdated(listener: (config: MonitorConfig) => void): () => void;
+  onReplayStateUpdated(listener: (state: ReplaySessionState) => void): () => void;
 }

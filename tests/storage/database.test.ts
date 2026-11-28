@@ -448,4 +448,50 @@ describe('AppDatabase', () => {
 
     db.close();
   });
+
+  it('summarizes recorded trading dates with SH and SZ bar counts descending', () => {
+    const db = new AppDatabase(':memory:');
+    db.upsertIntradayBars([
+      {
+        symbol: '000001.SH',
+        tradeDate: '2026-11-24',
+        minuteIndex: 0,
+        minuteStr: '09:30',
+        price: 3300,
+        cumVolume: 1000,
+        cumTurnover: 1e9,
+        barTurnover: 1e9,
+        source: 'tencent',
+      },
+      {
+        symbol: '000001.SH',
+        tradeDate: '2026-11-25',
+        minuteIndex: 0,
+        minuteStr: '09:30',
+        price: 3310,
+        cumVolume: 1000,
+        cumTurnover: 1e9,
+        barTurnover: 1e9,
+        source: 'tencent',
+      },
+      {
+        symbol: '399106.SZ',
+        tradeDate: '2026-11-25',
+        minuteIndex: 0,
+        minuteStr: '09:30',
+        price: 2100,
+        cumVolume: 1000,
+        cumTurnover: 1.2e9,
+        barTurnover: 1.2e9,
+        source: 'tencent',
+      },
+    ]);
+
+    expect(db.getRecordedDateSummaries()).toEqual([
+      { tradeDate: '2026-11-25', shBarCount: 1, szBarCount: 1 },
+      { tradeDate: '2026-11-24', shBarCount: 1, szBarCount: 0 },
+    ]);
+
+    db.close();
+  });
 });

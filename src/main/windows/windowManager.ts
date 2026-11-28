@@ -83,6 +83,7 @@ export interface WindowManagerOptions {
   onHudPositionCommitted: (position: WindowPosition) => void;
   onHudSizeCommitted?: (size: WindowSize) => void;
   onStateChanged: () => void;
+  onDetailHidden?: () => void;
   onWindowReady?: (win: BrowserWindow, view: 'hud' | 'detail') => void;
 }
 
@@ -434,7 +435,10 @@ export class WindowManager {
     });
 
     win.on('show', () => this.emitStateChanged());
-    win.on('hide', () => this.emitStateChanged());
+    win.on('hide', () => {
+      this.emitStateChanged();
+      this.options.onDetailHidden?.();
+    });
 
     win.on('close', (event) => {
       if (!this.isQuitting) {
@@ -686,6 +690,14 @@ export class WindowManager {
       if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send(channel, payload);
       }
+    }
+  }
+
+  /** 仅向详情浮层发送消息（用于独立复盘回放，避免高频驱动唤醒或干扰紧凑 HUD） */
+  sendToDetail(channel: string, payload: unknown): void {
+    const win = this.detailWindow;
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+      win.webContents.send(channel, payload);
     }
   }
 

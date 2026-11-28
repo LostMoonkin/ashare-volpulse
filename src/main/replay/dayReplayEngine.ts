@@ -36,6 +36,7 @@ import type {
   IntradayBarRow,
   MarketDashboardState,
   MarketPhaseType,
+  MarketTotalBarPoint,
   MarketTotalState,
   ProviderId,
   QuoteSnapshot,
@@ -201,6 +202,16 @@ export class DayReplayEngine {
   private latestState: MarketDashboardState | null = null;
   private replayAlerts: AlertDispatchPayload[] = [];
   private nextReplayAlertId = -1;
+  private suppressCallbacks = false;
+
+  private cachedPrevAggBars: ReturnType<typeof aggregateMarketTotalSeries>['bars'] = [];
+  private cachedPrevAggPoints: MarketTotalBarPoint[] = [];
+  private cachedPrevAggAuctionTurnover: number | null = null;
+  private cachedPrevFullDayTurnover: number | null = null;
+  private cachedTodayAggAuction: { auctionTurnover: number | null; degraded: boolean } = {
+    auctionTurnover: null,
+    degraded: true,
+  };
 
   constructor(options: DayReplayEngineOptions) {
     this.db = options.database;
@@ -328,6 +339,54 @@ export class DayReplayEngine {
       MARKET_TOTAL_SYMBOL,
       loadMarketTotalPredictionProfile(this.db, this.tradeDate)
     );
+    this.refreshPrecomputedMarketTotalBaselines();
+  }
+
+  private refreshPrecomputedMarketTotalBaselines(): void {
+    const [shSym, szSym] = MARKET_TOTAL_COMPONENTS;
+    const shPrevAll = this.prevBarsBySymbol.get(shSym) ?? [];
+    const szPrevAll = this.prevBarsBySymbol.get(szSym) ?? [];
+    const prevAggSeries = aggregateMarketTotalSeries(
+      toAggregatorBars(shPrevAll),
+      toAggregatorBars(szPrevAll)
+    );
+    this.cachedPrevAggBars = prevAggSeries.bars;
+    this.cachedPrevAggPoints = prevAggSeries.bars.map((b) => ({
+      minuteIndex: b.minuteIndex,
+      cumTurnover: b.cumTurnover,
+      barTurnover: b.barTurnover,
+    }));
+    this.cachedPrevFullDayTurnover =
+      prevAggSeries.bars.length > 0
+        ? prevAggSeries.bars[prevAggSeries.bars.length - 1].cumTurnover
+        : null;
+
+    const shTodayAuc = this.todayAuctionBySymbol.get(shSym)?.auctionTurnover ?? null;
+    const szTodayAuc = this.todayAuctionBySymbol.get(szSym)?.auctionTurnover ?? null;
+    const todayAggAuc = aggregateMarketTotalAuction([
+      ...(shTodayAuc !== null
+        ? [{ symbol: shSym, tradeDate: this.tradeDate, auctionTurnover: shTodayAuc }]
+        : []),
+      ...(szTodayAuc !== null
+        ? [{ symbol: szSym, tradeDate: this.tradeDate, auctionTurnover: szTodayAuc }]
+        : []),
+    ]);
+    this.cachedTodayAggAuction = {
+      auctionTurnover: todayAggAuc.auctionTurnover,
+      degraded: todayAggAuc.degraded,
+    };
+
+    const shPrevAuc = this.prevAuctionBySymbol.get(shSym)?.auctionTurnover ?? null;
+    const szPrevAuc = this.prevAuctionBySymbol.get(szSym)?.auctionTurnover ?? null;
+    const prevAggAuc = aggregateMarketTotalAuction([
+      ...(shPrevAuc !== null && this.prevTradeDate
+        ? [{ symbol: shSym, tradeDate: this.prevTradeDate, auctionTurnover: shPrevAuc }]
+        : []),
+      ...(szPrevAuc !== null && this.prevTradeDate
+        ? [{ symbol: szSym, tradeDate: this.prevTradeDate, auctionTurnover: szPrevAuc }]
+        : []),
+    ]);
+    this.cachedPrevAggAuctionTurnover = prevAggAuc.auctionTurnover;
   }
 
   /** 启动加速定时回放（驱动渲染进程从 09:25 推进至 15:00） */
@@ -457,7 +516,9 @@ export class DayReplayEngine {
       };
       this.replayAlerts = [payload, ...this.replayAlerts].slice(0, 200);
       triggeredThisStep.push(payload);
-      this.onReplayAlert?.(payload);
+      if (!this.suppressCallbacks) {
+        this.onReplayAlert?.(payload);
+      }
     };
 
     const marketTotal = this.buildMarketTotalStep(minuteIndex, timestampMs, emitReplayAlert);
@@ -537,11 +598,13 @@ export class DayReplayEngine {
       marketTotal,
       indices,
       watchlist,
-      recentAlerts: this.replayAlerts,
+      recentAlerts: [...this.replayAlerts],
     };
 
     this.latestState = state;
-    this.onStateUpdate?.(state);
+    if (!this.suppressCallbacks) {
+      this.onStateUpdate?.(state);
+    }
 
     return {
       stepIndex: nextStep,
@@ -550,6 +613,28 @@ export class DayReplayEngine {
       state,
       triggeredAlerts: triggeredThisStep,
     };
+  }
+
+  /** 同步静默计算 09:25 → 15:00 全天 241 帧快照（不触发外部回调，供独立控制台缓存与 Seek 使用） */
+  computeAllFrames(): ReplayStepResult[] {
+    this.stop();
+    this.reloadWatchlistAndPreload();
+    this.currentStepIndex = -1;
+    this.replayAlerts = [];
+    this.nextReplayAlertId = -1;
+    this.alertEngine.resetCooldowns();
+    this.suppressCallbacks = true;
+    try {
+      const frames: ReplayStepResult[] = [];
+      for (let s = 0; s < TOTAL_REPLAY_STEPS; s++) {
+        const res = this.stepNext();
+        if (!res) break;
+        frames.push(res);
+      }
+      return frames;
+    } finally {
+      this.suppressCallbacks = false;
+    }
   }
 
   /** 同步完整跑通 09:25 → 15:00 全天 241 帧并输出校验汇总 */
@@ -646,8 +731,6 @@ export class DayReplayEngine {
     const [shSym, szSym] = MARKET_TOTAL_COMPONENTS;
     const shTodayAll = this.todayBarsBySymbol.get(shSym) ?? [];
     const szTodayAll = this.todayBarsBySymbol.get(szSym) ?? [];
-    const shPrevAll = this.prevBarsBySymbol.get(shSym) ?? [];
-    const szPrevAll = this.prevBarsBySymbol.get(szSym) ?? [];
 
     const shTodayVisible =
       minuteIndex === null ? [] : shTodayAll.filter((b) => b.minuteIndex <= minuteIndex);
@@ -658,37 +741,13 @@ export class DayReplayEngine {
       toAggregatorBars(shTodayVisible),
       toAggregatorBars(szTodayVisible)
     );
-    const prevAggSeries = aggregateMarketTotalSeries(
-      toAggregatorBars(shPrevAll),
-      toAggregatorBars(szPrevAll)
-    );
 
     const shTodayAuc = this.todayAuctionBySymbol.get(shSym)?.auctionTurnover ?? null;
     const szTodayAuc = this.todayAuctionBySymbol.get(szSym)?.auctionTurnover ?? null;
-    const todayAggAuc = aggregateMarketTotalAuction([
-      ...(shTodayAuc !== null
-        ? [{ symbol: shSym, tradeDate: this.tradeDate, auctionTurnover: shTodayAuc }]
-        : []),
-      ...(szTodayAuc !== null
-        ? [{ symbol: szSym, tradeDate: this.tradeDate, auctionTurnover: szTodayAuc }]
-        : []),
-    ]);
-
-    const shPrevAuc = this.prevAuctionBySymbol.get(shSym)?.auctionTurnover ?? null;
-    const szPrevAuc = this.prevAuctionBySymbol.get(szSym)?.auctionTurnover ?? null;
-    const prevAggAuc = aggregateMarketTotalAuction([
-      ...(shPrevAuc !== null && this.prevTradeDate
-        ? [{ symbol: shSym, tradeDate: this.prevTradeDate, auctionTurnover: shPrevAuc }]
-        : []),
-      ...(szPrevAuc !== null && this.prevTradeDate
-        ? [{ symbol: szSym, tradeDate: this.prevTradeDate, auctionTurnover: szPrevAuc }]
-        : []),
-    ]);
-
-    const prevFullDayTurnover =
-      prevAggSeries.bars.length > 0
-        ? prevAggSeries.bars[prevAggSeries.bars.length - 1].cumTurnover
-        : null;
+    const todayAggAuc = this.cachedTodayAggAuction;
+    const prevAggBars = this.cachedPrevAggBars;
+    const prevAggAuctionTurnover = this.cachedPrevAggAuctionTurnover;
+    const prevFullDayTurnover = this.cachedPrevFullDayTurnover;
 
     if (minuteIndex === null) {
       // 09:25 集合竞价帧：展示竞价锚点，不进入连续竞价斜率与告警
@@ -701,15 +760,11 @@ export class DayReplayEngine {
         shTurnover: shTodayAuc,
         szTurnover: szTodayAuc,
         auctionTurnover: todayAggAuc.auctionTurnover,
-        prevAuctionTurnover: prevAggAuc.auctionTurnover,
+        prevAuctionTurnover: prevAggAuctionTurnover,
         prevFullDayTurnover,
         metrics: null,
         todaySeries: [],
-        prevSeries: prevAggSeries.bars.map((b) => ({
-          minuteIndex: b.minuteIndex,
-          cumTurnover: b.cumTurnover,
-          barTurnover: b.barTurnover,
-        })),
+        prevSeries: this.cachedPrevAggPoints,
         degraded: todayAggAuc.degraded,
         degradedReason: todayAggAuc.degraded ? '09:25 集合竞价数据缺失（不补零）' : null,
       };
@@ -748,7 +803,7 @@ export class DayReplayEngine {
 
     let degraded = snapAgg.degraded;
     let degradedReason: string | null = snapAgg.reason;
-    if (prevAggSeries.bars.length === 0) {
+    if (prevAggBars.length === 0) {
       degraded = true;
       degradedReason = degradedReason ?? 'MISSING_PREV_BASELINE';
     }
@@ -757,12 +812,12 @@ export class DayReplayEngine {
     const metrics = !snapAgg.degraded
       ? evaluateEnergy({
           todaySeries: todayAggSeries.bars,
-          prevSeries: prevAggSeries.bars,
+          prevSeries: prevAggBars,
           minuteIndex,
           currentTodayCumTurnover: snapAgg.cumTurnover,
           elapsedSeconds: 60,
           prevFullDayTurnover,
-          prevAuctionTurnover: prevAggAuc.auctionTurnover,
+          prevAuctionTurnover: prevAggAuctionTurnover,
           predictionProfile: this.predictionProfiles.get(MARKET_TOTAL_SYMBOL) ?? null,
           config: {
             ...this.energyConfig,
@@ -794,7 +849,7 @@ export class DayReplayEngine {
       shTurnover: snapAgg.shTurnover,
       szTurnover: snapAgg.szTurnover,
       auctionTurnover: todayAggAuc.auctionTurnover,
-      prevAuctionTurnover: prevAggAuc.auctionTurnover,
+      prevAuctionTurnover: prevAggAuctionTurnover,
       prevFullDayTurnover,
       metrics,
       todaySeries: todayAggSeries.bars.map((b) => ({
@@ -802,11 +857,7 @@ export class DayReplayEngine {
         cumTurnover: b.cumTurnover,
         barTurnover: b.barTurnover,
       })),
-      prevSeries: prevAggSeries.bars.map((b) => ({
-        minuteIndex: b.minuteIndex,
-        cumTurnover: b.cumTurnover,
-        barTurnover: b.barTurnover,
-      })),
+      prevSeries: this.cachedPrevAggPoints,
       shReference: {
         todaySeries: [...shTodayVisible],
         minuteIndex,

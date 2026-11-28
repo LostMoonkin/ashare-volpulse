@@ -7,6 +7,7 @@ import {
   DEFAULT_RETENTION_TRADING_DAYS,
   ENCRYPTED_KEY_FILENAME,
   MARKET_TOTAL_SYMBOL,
+  type ReplaySpeedMultiplier,
 } from '../shared/constants';
 import { IPC_CHANNELS } from '../shared/ipc';
 import type {
@@ -20,6 +21,8 @@ import type {
   MonitorConfig,
   OpenDetailOptions,
   ProviderHealthStatus,
+  ReplayApplyParamsResult,
+  ReplayMonitorParams,
   WatchlistAddInput,
   WatchlistUpdateInput,
 } from '../shared/types';
@@ -30,7 +33,12 @@ import {
   SinaProvider,
   TencentProvider,
 } from './providers';
-import { DayReplayEngine, parseReplayArgs, type ReplayCliOptions } from './replay';
+import {
+  DayReplayEngine,
+  InteractiveReplayController,
+  parseReplayArgs,
+  type ReplayCliOptions,
+} from './replay';
 import { PollingScheduler } from './scheduler';
 import { AppDatabase } from './storage/database';
 import { migrateLegacyUserDataDir } from './storage/legacyDataMigration';
@@ -68,6 +76,7 @@ let bossKeyManager: BossKeyManager | null = null;
 let alertDispatcher: AlertDispatcher | null = null;
 let scheduler: PollingScheduler | null = null;
 let replayEngine: DayReplayEngine | null = null;
+let interactiveReplayController: InteractiveReplayController | null = null;
 let replayCliOptions: ReplayCliOptions | null = null;
 
 let replayCliParseError: string | null = null;
@@ -351,6 +360,7 @@ function registerIpcHandlers(): void {
       }
       const next = monitorSettingsStore.update(patch);
       applyMonitorConfigToScheduler(next);
+      interactiveReplayController?.syncLiveMonitorConfig(next);
       windowManager?.broadcast(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, next);
       // 触发即时重算与广播，使阈值/斜率窗口/刷新周期改动无需重启即刻生效
       void scheduler?.refreshNow().catch(() => {});
@@ -368,6 +378,7 @@ function registerIpcHandlers(): void {
       throw new Error('WatchlistService is not initialized.');
     }
     const list = watchlistService.add(input);
+    interactiveReplayController?.syncWatchlistChanged();
     void scheduler?.refreshNow().catch(() => {});
     return list;
   });
@@ -377,6 +388,7 @@ function registerIpcHandlers(): void {
       throw new Error('WatchlistService is not initialized.');
     }
     const list = watchlistService.remove(symbol);
+    interactiveReplayController?.syncWatchlistChanged();
     void scheduler?.refreshNow().catch(() => {});
     return list;
   });
@@ -386,6 +398,7 @@ function registerIpcHandlers(): void {
       throw new Error('WatchlistService is not initialized.');
     }
     const list = watchlistService.reorder(symbols);
+    interactiveReplayController?.syncWatchlistChanged();
     void scheduler?.refreshNow().catch(() => {});
     return list;
   });
@@ -395,6 +408,7 @@ function registerIpcHandlers(): void {
       throw new Error('WatchlistService is not initialized.');
     }
     const list = watchlistService.update(input);
+    interactiveReplayController?.syncWatchlistChanged();
     void scheduler?.refreshNow().catch(() => {});
     return list;
   });
@@ -533,6 +547,99 @@ function registerIpcHandlers(): void {
       });
     }
   );
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_GET_DATES, () => {
+    return interactiveReplayController?.getAvailableDates() ?? [];
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_GET_STATE, () => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_LOAD_DATE, (_event, tradeDate?: string | null) => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.loadDate(tradeDate);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_PLAY, () => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.play();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_PAUSE, () => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.pause();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_RESTART, () => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.restart();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_SEEK, (_event, stepIndex: number) => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.seek(stepIndex);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_STEP, (_event, delta: number) => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.step(delta);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_SET_SPEED, (_event, speed: ReplaySpeedMultiplier) => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.setSpeed(speed);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.REPLAY_UPDATE_PARAMS,
+    (_event, patch: Partial<ReplayMonitorParams>) => {
+      if (!interactiveReplayController) {
+        throw new Error('InteractiveReplayController is not initialized.');
+      }
+      return interactiveReplayController.updateParams(patch);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.REPLAY_RESET_PARAMS, () => {
+    if (!interactiveReplayController) {
+      throw new Error('InteractiveReplayController is not initialized.');
+    }
+    return interactiveReplayController.resetParams();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.REPLAY_APPLY_PARAMS_TO_LIVE,
+    (): ReplayApplyParamsResult => {
+      if (!interactiveReplayController || !monitorSettingsStore) {
+        throw new Error('InteractiveReplayController is not initialized.');
+      }
+      const effectiveParams = interactiveReplayController.getEffectiveParams();
+      const next = monitorSettingsStore.update(effectiveParams);
+      applyMonitorConfigToScheduler(next);
+      windowManager?.broadcast(IPC_CHANNELS.MONITOR_CONFIG_UPDATED, next);
+      void scheduler?.refreshNow().catch(() => {});
+      const replayState = interactiveReplayController.markAppliedToLive(next);
+      return { replayState, monitorConfig: next };
+    }
+  );
 }
 
 function initServices(): void {
@@ -588,6 +695,9 @@ function initServices(): void {
       if (shellSettings && windowManager && bossKeyManager) {
         syncShellState();
       }
+    },
+    onDetailHidden: () => {
+      interactiveReplayController?.pause();
     },
     onWindowReady: (win) => {
       if (win.isDestroyed()) return;
@@ -724,6 +834,14 @@ function initServices(): void {
       onAlertTriggered: handleAlertTriggered,
     });
   }
+
+  interactiveReplayController = new InteractiveReplayController({
+    database,
+    getLiveMonitorConfig: () => monitorSettingsStore!.load(),
+    onStateUpdate: (state) => {
+      windowManager?.sendToDetail(IPC_CHANNELS.REPLAY_STATE_UPDATED, state);
+    },
+  });
 }
 
 if (replayCliParseError) {
@@ -781,6 +899,8 @@ if (replayCliParseError) {
       );
       replayEngine?.stop();
       replayEngine = null;
+      interactiveReplayController?.dispose();
+      interactiveReplayController = null;
       scheduler?.stop();
       scheduler = null;
       windowManager?.destroyAll();
@@ -806,6 +926,8 @@ if (replayCliParseError) {
     trayManager = null;
     replayEngine?.stop();
     replayEngine = null;
+    interactiveReplayController?.dispose();
+    interactiveReplayController = null;
     scheduler?.stop();
     scheduler = null;
     hithinkProvider = null;
